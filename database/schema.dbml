@@ -1,0 +1,333 @@
+// ==============================================
+// AI Product Curator - Database Schema (DBML)
+// ==============================================
+// Minimal, Scalable, Reliable
+//
+// View this schema visually at: https://dbdiagram.io
+// Just paste this content there!
+// ==============================================
+
+Project AIProductCurator {
+  database_type: 'PostgreSQL'
+  Note: 'E-commerce intelligence platform with consumer search and business analytics'
+}
+
+// ==============================================
+// CORE TABLES - Product Data
+// ==============================================
+
+Table products {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  name varchar(500) [not null]
+  category varchar(100) [not null]
+  description text
+  image_url text
+  created_at timestamp [default: `now()`]
+  updated_at timestamp [default: `now()`]
+
+  indexes {
+    category
+    created_at
+    (name) [type: gin, note: 'Full-text search']
+  }
+
+  Note: 'Core product info - deduplicated across platforms'
+}
+
+Table platforms {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  name varchar(100) [unique, not null]
+  base_url varchar(500)
+  logo_url varchar(500)
+  is_active boolean [default: true]
+  created_at timestamp [default: `now()`]
+
+  Note: 'E-commerce platforms (Amazon, Flipkart, etc.)'
+}
+
+Table product_listings {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  product_id uuid [ref: > products.id, not null]
+  platform_id uuid [ref: > platforms.id, not null]
+
+  // Platform-specific data
+  platform_product_id varchar(255)
+  url text [not null]
+
+  // Pricing
+  price decimal(12,2) [not null]
+  original_price decimal(12,2)
+  currency varchar(10) [default: 'USD']
+
+  // Ratings & Reviews
+  rating decimal(3,2)
+  review_count int [default: 0]
+
+  // Availability
+  availability varchar(50) [default: 'Unknown']
+  shipping_cost decimal(10,2) [default: 0]
+  delivery_days int
+
+  // Status
+  is_active boolean [default: true]
+  last_scraped_at timestamp [default: `now()`]
+  created_at timestamp [default: `now()`]
+  updated_at timestamp [default: `now()`]
+
+  indexes {
+    product_id
+    platform_id
+    price
+    rating
+    is_active
+    (product_id, platform_id) [unique]
+  }
+
+  Note: 'Platform-specific product listings with prices'
+}
+
+Table price_history {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  listing_id uuid [ref: > product_listings.id, not null]
+  price decimal(12,2) [not null]
+  original_price decimal(12,2)
+  availability varchar(50)
+  recorded_at timestamp [default: `now()`]
+
+  indexes {
+    listing_id
+    recorded_at
+    (listing_id, recorded_at)
+  }
+
+  Note: 'Historical price tracking for trends'
+}
+
+// ==============================================
+// SEARCH & RECOMMENDATIONS
+// ==============================================
+
+Table user_searches {
+  id uuid [pk, default: `uuid_generate_v4()`]
+
+  // Original query
+  query_text text [not null]
+
+  // Extracted by Agent 1
+  extracted_category varchar(100)
+  extracted_product_type varchar(100)
+  extracted_min_price decimal(12,2)
+  extracted_max_price decimal(12,2)
+  extracted_features text[]
+  extracted_intent varchar(50)
+
+  // Results
+  results_count int [default: 0]
+
+  // Session tracking
+  session_id varchar(255)
+
+  // Timestamps
+  searched_at timestamp [default: `now()`]
+
+  indexes {
+    searched_at
+    extracted_category
+    session_id
+  }
+
+  Note: 'User search queries and extracted parameters'
+}
+
+Table recommendations {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  search_id uuid [ref: > user_searches.id]
+  listing_id uuid [ref: > product_listings.id, not null]
+
+  rank int [not null]
+  score decimal(5,4)
+  reason text
+
+  created_at timestamp [default: `now()`]
+
+  indexes {
+    search_id
+    listing_id
+    rank
+  }
+
+  Note: 'AI-generated product recommendations'
+}
+
+// ==============================================
+// BUSINESS INTELLIGENCE
+// ==============================================
+
+Table market_metrics {
+  id uuid [pk, default: `uuid_generate_v4()`]
+
+  category varchar(100) [not null]
+  metric_name varchar(100) [not null]
+  metric_value decimal(15,2)
+
+  // Time period
+  period_start timestamp
+  period_end timestamp
+
+  // Metadata
+  metadata jsonb
+  calculated_at timestamp [default: `now()`]
+
+  indexes {
+    category
+    metric_name
+    (category, metric_name, period_start)
+  }
+
+  Note: 'Aggregated market statistics'
+}
+
+Table platform_analytics {
+  id uuid [pk, default: `uuid_generate_v4()`]
+
+  platform_id uuid [ref: > platforms.id, not null]
+  category varchar(100) [not null]
+
+  // Metrics
+  product_count int
+  avg_price decimal(12,2)
+  min_price decimal(12,2)
+  max_price decimal(12,2)
+  avg_rating decimal(3,2)
+  market_share decimal(5,2)
+
+  // Time
+  analysis_date date [not null]
+  created_at timestamp [default: `now()`]
+
+  indexes {
+    platform_id
+    category
+    analysis_date
+    (platform_id, category, analysis_date) [unique]
+  }
+
+  Note: 'Platform comparison and market share data'
+}
+
+Table search_trends {
+  id uuid [pk, default: `uuid_generate_v4()`]
+
+  keyword varchar(500) [not null]
+  category varchar(100)
+  search_count int [default: 1]
+  trend_date date [not null]
+
+  created_at timestamp [default: `now()`]
+
+  indexes {
+    keyword
+    category
+    trend_date
+    (keyword, trend_date) [unique]
+  }
+
+  Note: 'Search volume trends over time'
+}
+
+Table business_insights {
+  id uuid [pk, default: `uuid_generate_v4()`]
+
+  insight_type varchar(50) [not null]
+  category varchar(100)
+  title varchar(500) [not null]
+  description text [not null]
+
+  confidence_score decimal(5,4)
+  impact_level varchar(20)
+
+  data_sources jsonb
+
+  is_active boolean [default: true]
+  generated_at timestamp [default: `now()`]
+
+  indexes {
+    insight_type
+    category
+    is_active
+    generated_at
+  }
+
+  Note: 'AI-generated business insights'
+}
+
+// ==============================================
+// SCRAPING & JOBS
+// ==============================================
+
+Table scraping_jobs {
+  id uuid [pk, default: `uuid_generate_v4()`]
+
+  job_type varchar(50) [not null]
+  platform_id uuid [ref: > platforms.id]
+
+  // Parameters
+  search_query text
+  category varchar(100)
+  params jsonb
+
+  // Status
+  status varchar(20) [default: 'pending', note: 'pending, running, completed, failed']
+  progress int [default: 0]
+  results_count int [default: 0]
+  error_message text
+
+  // Timestamps
+  started_at timestamp
+  completed_at timestamp
+  created_at timestamp [default: `now()`]
+
+  indexes {
+    status
+    platform_id
+    created_at
+  }
+
+  Note: 'Track scraping job status and results'
+}
+
+// ==============================================
+// ENUMS (for documentation)
+// ==============================================
+
+Enum availability_status {
+  in_stock
+  out_of_stock
+  limited_stock
+  pre_order
+  unknown
+}
+
+Enum job_status {
+  pending
+  running
+  completed
+  failed
+  cancelled
+}
+
+Enum insight_type {
+  opportunity
+  threat
+  trend
+  anomaly
+  recommendation
+}
+
+Enum intent_type {
+  product_search
+  price_comparison
+  recommendation
+  market_analysis
+  competitive_analysis
+}
