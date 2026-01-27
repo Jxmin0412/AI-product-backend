@@ -1,6 +1,6 @@
 """
-LLM Client - Supports multiple providers (Groq, HuggingFace, OpenAI-compatible)
-Groq is the default - fast and free.
+LLM Client - Supports multiple providers (HuggingFace, Groq, OpenAI-compatible)
+HuggingFace is the default - uses OpenAI-compatible router endpoint.
 """
 import logging
 import json
@@ -15,22 +15,28 @@ logger = logging.getLogger(__name__)
 
 class LLMProvider(Enum):
     """Supported LLM providers."""
-    GROQ = "groq"
     HUGGINGFACE = "huggingface"
+    GROQ = "groq"
     OPENAI = "openai"
 
 
 class LLMClient:
     """
     Unified LLM client supporting multiple providers.
-    Default: Groq (fast, free tier available)
+    Default: HuggingFace (OpenAI-compatible router endpoint)
     """
 
     # Default models per provider
     DEFAULT_MODELS = {
-        LLMProvider.GROQ: "llama-3.3-70b-versatile",  # Latest recommended model
-        LLMProvider.HUGGINGFACE: "microsoft/Phi-3-mini-4k-instruct",
+        LLMProvider.HUGGINGFACE: "meta-llama/Llama-3.1-8B-Instruct:novita",
+        LLMProvider.GROQ: "llama-3.3-70b-versatile",
         LLMProvider.OPENAI: "gpt-3.5-turbo",
+    }
+
+    # Available HuggingFace models via router
+    HUGGINGFACE_MODELS = {
+        "meta-llama/Llama-3.1-8B-Instruct:novita": "Llama 3.1 8B - Fast and capable",
+        "meta-llama/Llama-3.1-70B-Instruct:novita": "Llama 3.1 70B - Most capable",
     }
 
     # Available Groq models (all free)
@@ -42,7 +48,8 @@ class LLMClient:
         "gemma2-9b-it": "Gemma 2 9B - Google's model",
     }
 
-    # Groq API endpoint
+    # API endpoints
+    HUGGINGFACE_API_URL = "https://router.huggingface.co/v1/chat/completions"
     GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
     def __init__(
@@ -93,10 +100,10 @@ class LLMClient:
         Returns:
             Generated text string
         """
-        if self.provider == LLMProvider.GROQ:
+        if self.provider == LLMProvider.HUGGINGFACE:
+            return await self._generate_huggingface(prompt, system_prompt, max_tokens, temperature)
+        elif self.provider == LLMProvider.GROQ:
             return await self._generate_groq(prompt, system_prompt, max_tokens, temperature)
-        elif self.provider == LLMProvider.HUGGINGFACE:
-            return await self._generate_huggingface(prompt, max_tokens, temperature)
         else:
             raise ValueError(f"Unsupported provider: {self.provider}")
 
@@ -156,21 +163,27 @@ class LLMClient:
     async def _generate_huggingface(
         self,
         prompt: str,
+        system_prompt: Optional[str],
         max_tokens: int,
         temperature: float
     ) -> str:
-        """Generate using HuggingFace Inference API."""
+        """Generate using HuggingFace OpenAI-compatible router API."""
         try:
-            # Format prompt for the model
-            formatted_prompt = f"<|user|>\n{prompt}<|end|>\n<|assistant|>"
+            if not self.api_key:
+                raise ValueError("HuggingFace API key not set. Check HUGGINGFACE_API_KEY in .env")
+
+            messages = []
+
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+
+            messages.append({"role": "user", "content": prompt})
 
             payload = {
-                "inputs": formatted_prompt,
-                "parameters": {
-                    "max_new_tokens": max_tokens,
-                    "temperature": temperature,
-                    "return_full_text": False,
-                }
+                "model": self.model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
             }
 
             headers = {
@@ -178,18 +191,24 @@ class LLMClient:
                 "Content-Type": "application/json",
             }
 
-            url = f"https://api-inference.huggingface.co/models/{self.model}"
-
             async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(url, headers=headers, json=payload)
+                response = await client.post(
+                    self.HUGGINGFACE_API_URL,
+                    headers=headers,
+                    json=payload
+                )
                 response.raise_for_status()
                 result = response.json()
 
-                if isinstance(result, list) and len(result) > 0:
-                    return result[0].get("generated_text", "").strip()
+                # Extract generated text (OpenAI-compatible format)
+                generated = result["choices"][0]["message"]["content"]
 
-                return ""
+                logger.debug(f"HuggingFace response: {generated[:100]}...")
+                return generated.strip()
 
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HuggingFace API error: {e.response.status_code} - {e.response.text}")
+            raise
         except Exception as e:
             logger.error(f"HuggingFace generation error: {e}")
             raise
@@ -298,14 +317,23 @@ def get_llm_client() -> LLMClient:
         from config.settings import settings
 
         # Debug: log what we found
-        groq_key = settings.GROQ_API_KEY or os.getenv("GROQ_API_KEY", "")
         hf_key = settings.HUGGINGFACE_API_KEY or os.getenv("HUGGINGFACE_API_KEY", "")
+        groq_key = settings.GROQ_API_KEY or os.getenv("GROQ_API_KEY", "")
 
-        logger.info(f"GROQ_API_KEY present: {bool(groq_key)} (length: {len(groq_key) if groq_key else 0})")
-        logger.info(f"HUGGINGFACE_API_KEY present: {bool(hf_key)}")
+        logger.info(f"HUGGINGFACE_API_KEY present: {bool(hf_key)} (length: {len(hf_key) if hf_key else 0})")
+        logger.info(f"GROQ_API_KEY present: {bool(groq_key)}")
 
-        # Check for Groq first (preferred)
-        if groq_key:
+        # Check for HuggingFace first (preferred - uses OpenAI-compatible router)
+        if hf_key:
+            model = settings.HUGGINGFACE_MODEL or os.getenv("HUGGINGFACE_MODEL", "meta-llama/Llama-3.1-8B-Instruct:novita")
+            logger.info(f"Initializing HuggingFace LLM client with model: {model}")
+            _llm_client = LLMClient(
+                provider=LLMProvider.HUGGINGFACE,
+                api_key=hf_key,
+                model=model
+            )
+        elif groq_key:
+            # Fallback to Groq
             model = settings.GROQ_MODEL or os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
             logger.info(f"Initializing Groq LLM client with model: {model}")
             _llm_client = LLMClient(
@@ -313,29 +341,20 @@ def get_llm_client() -> LLMClient:
                 api_key=groq_key,
                 model=model
             )
-        elif hf_key:
-            # Fallback to HuggingFace
-            model = settings.HUGGINGFACE_MODEL or os.getenv("HUGGINGFACE_MODEL", "microsoft/Phi-3-mini-4k-instruct")
-            logger.info(f"Initializing HuggingFace LLM client with model: {model}")
-            _llm_client = LLMClient(
-                provider=LLMProvider.HUGGINGFACE,
-                api_key=hf_key,
-                model=model
-            )
         else:
-            logger.error("No LLM API key found! Set GROQ_API_KEY or HUGGINGFACE_API_KEY in .env")
+            logger.error("No LLM API key found! Set HUGGINGFACE_API_KEY or GROQ_API_KEY in .env")
             # Create a client anyway (will fail on use but won't crash)
             _llm_client = LLMClient(
-                provider=LLMProvider.GROQ,
+                provider=LLMProvider.HUGGINGFACE,
                 api_key="",
-                model="llama-3.3-70b-versatile"
+                model="meta-llama/Llama-3.1-8B-Instruct:novita"
             )
 
     return _llm_client
 
 
 def init_llm_client(
-    provider: LLMProvider = LLMProvider.GROQ,
+    provider: LLMProvider = LLMProvider.HUGGINGFACE,
     api_key: str = None,
     model: str = None
 ) -> LLMClient:
