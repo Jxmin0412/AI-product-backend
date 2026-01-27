@@ -8,6 +8,7 @@ pydantic-settings==2.1.0
 psycopg2-binary==2.9.9
 sqlalchemy==2.0.25
 alembic==1.13.1
+asyncpg==0.29.0
 
 # LLM & AI
 langchain==0.1.4
@@ -15,12 +16,17 @@ langchain-community==0.0.16
 langgraph==0.0.20
 huggingface-hub==0.20.3
 sentence-transformers==2.3.1
+groq>=1.0.0
 
 # Web Scraping
 beautifulsoup4==4.12.3
 lxml==5.1.0
 requests==2.31.0
 playwright==1.41.0
+html2text==2024.2.26
+
+# LLM Utilities
+tenacity==8.2.3
 
 # Data Processing
 pandas==2.2.0

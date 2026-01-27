@@ -12,7 +12,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from config.settings import settings
-from database.connection import init_db, db_manager
+from database.connection import init_db, db_manager, dispose_db, async_dispose_db
 from api import consumer_routes, business_routes
 from api.auth import router as auth_router
 
@@ -53,6 +53,14 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down AI Product Curator API...")
 
+    # Dispose database connections properly
+    try:
+        await async_dispose_db()
+        dispose_db()
+        logger.info("Database connections disposed successfully")
+    except Exception as e:
+        logger.warning(f"Error disposing database connections: {e}")
+
 
 # Create FastAPI app
 app = FastAPI(
@@ -65,9 +73,18 @@ app = FastAPI(
 )
 
 # CORS Configuration
+# Allow frontend origins (local development and production)
+CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+    "https://curatly.onrender.com",  # Production frontend on Render
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -139,11 +156,38 @@ async def root():
 async def health_check():
     """Health check endpoint for monitoring."""
     db_healthy = db_manager.health_check()
+    pool_status = db_manager.get_pool_status()
 
     return {
         "status": "healthy" if db_healthy else "unhealthy",
         "database": "connected" if db_healthy else "disconnected",
-        "environment": settings.ENVIRONMENT
+        "environment": settings.ENVIRONMENT,
+        "pool": pool_status
+    }
+
+
+# Database pool status endpoint
+@app.get("/health/db")
+async def database_health():
+    """Detailed database and connection pool health."""
+    db_healthy = db_manager.health_check()
+    pool_status = db_manager.get_pool_status()
+
+    return {
+        "healthy": db_healthy,
+        "database": {
+            "name": settings.DB_NAME,
+            "host": settings.DB_HOST,
+            "port": settings.DB_PORT,
+        },
+        "pool": pool_status,
+        "config": {
+            "pool_size": settings.DB_POOL_SIZE,
+            "max_overflow": settings.DB_POOL_MAX_OVERFLOW,
+            "pool_timeout": settings.DB_POOL_TIMEOUT,
+            "pool_recycle": settings.DB_POOL_RECYCLE,
+            "pre_ping": settings.DB_POOL_PRE_PING,
+        }
     }
 
 

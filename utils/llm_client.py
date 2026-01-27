@@ -4,7 +4,8 @@ Groq is the default - fast and free.
 """
 import logging
 import json
-from typing import Optional, Dict, Any, List
+import os
+from typing import Optional, Dict, Any
 from enum import Enum
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -16,7 +17,7 @@ class LLMProvider(Enum):
     """Supported LLM providers."""
     GROQ = "groq"
     HUGGINGFACE = "huggingface"
-    OPENAI = "openai"  # Or any OpenAI-compatible API
+    OPENAI = "openai"
 
 
 class LLMClient:
@@ -25,23 +26,24 @@ class LLMClient:
     Default: Groq (fast, free tier available)
     """
 
-    # Groq API settings
-    GROQ_BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
-
     # Default models per provider
     DEFAULT_MODELS = {
-        LLMProvider.GROQ: "mixtral-8x7b-32768",  # Fast, good quality
-        LLMProvider.HUGGINGFACE: "mistralai/Mistral-7B-Instruct-v0.3",
+        LLMProvider.GROQ: "llama-3.3-70b-versatile",  # Latest recommended model
+        LLMProvider.HUGGINGFACE: "microsoft/Phi-3-mini-4k-instruct",
         LLMProvider.OPENAI: "gpt-3.5-turbo",
     }
 
     # Available Groq models (all free)
     GROQ_MODELS = {
-        "mixtral-8x7b-32768": "Mixtral 8x7B - Best quality",
+        "llama-3.3-70b-versatile": "Llama 3.3 70B - Latest, most capable",
         "llama-3.1-70b-versatile": "Llama 3.1 70B - Very capable",
         "llama-3.1-8b-instant": "Llama 3.1 8B - Fast",
+        "mixtral-8x7b-32768": "Mixtral 8x7B - Good quality",
         "gemma2-9b-it": "Gemma 2 9B - Google's model",
     }
+
+    # Groq API endpoint
+    GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
     def __init__(
         self,
@@ -63,8 +65,8 @@ class LLMClient:
 
         if not self.api_key:
             logger.warning(f"No API key provided for {provider.value}. LLM calls will fail.")
-
-        logger.info(f"LLM Client initialized: provider={provider.value}, model={self.model}")
+        else:
+            logger.info(f"LLM Client initialized: provider={provider.value}, model={self.model}")
 
     @retry(
         stop=stop_after_attempt(3),
@@ -75,7 +77,7 @@ class LLMClient:
         self,
         prompt: str,
         system_prompt: Optional[str] = None,
-        max_tokens: int = 256,
+        max_tokens: int = 1024,
         temperature: float = 0.7,
         **kwargs
     ) -> str:
@@ -105,8 +107,11 @@ class LLMClient:
         max_tokens: int,
         temperature: float
     ) -> str:
-        """Generate using Groq API (OpenAI-compatible)."""
+        """Generate using Groq API via httpx (no SDK required)."""
         try:
+            if not self.api_key:
+                raise ValueError("Groq API key not set. Check GROQ_API_KEY in .env")
+
             messages = []
 
             if system_prompt:
@@ -126,9 +131,9 @@ class LLMClient:
                 "Content-Type": "application/json",
             }
 
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
-                    self.GROQ_BASE_URL,
+                    self.GROQ_API_URL,
                     headers=headers,
                     json=payload
                 )
@@ -156,8 +161,8 @@ class LLMClient:
     ) -> str:
         """Generate using HuggingFace Inference API."""
         try:
-            # Format prompt for Mistral
-            formatted_prompt = f"<s>[INST] {prompt} [/INST]"
+            # Format prompt for the model
+            formatted_prompt = f"<|user|>\n{prompt}<|end|>\n<|assistant|>"
 
             payload = {
                 "inputs": formatted_prompt,
@@ -270,28 +275,60 @@ _llm_client: Optional[LLMClient] = None
 def get_llm_client() -> LLMClient:
     """
     Get or create global LLM client instance.
-    Reads configuration from environment variables.
+    Reads configuration from settings (which loads from .env file).
     """
     global _llm_client
 
     if _llm_client is None:
+        # Ensure .env is loaded
         import os
+        from pathlib import Path
+
+        # Try to load .env directly if settings didn't load it
+        env_path = Path(__file__).parent.parent / ".env"
+        if env_path.exists():
+            try:
+                from dotenv import load_dotenv
+                load_dotenv(env_path)
+                logger.info(f"Loaded .env from {env_path}")
+            except ImportError:
+                pass
+
+        # Now import settings
+        from config.settings import settings
+
+        # Debug: log what we found
+        groq_key = settings.GROQ_API_KEY or os.getenv("GROQ_API_KEY", "")
+        hf_key = settings.HUGGINGFACE_API_KEY or os.getenv("HUGGINGFACE_API_KEY", "")
+
+        logger.info(f"GROQ_API_KEY present: {bool(groq_key)} (length: {len(groq_key) if groq_key else 0})")
+        logger.info(f"HUGGINGFACE_API_KEY present: {bool(hf_key)}")
 
         # Check for Groq first (preferred)
-        groq_key = os.getenv("GROQ_API_KEY")
         if groq_key:
+            model = settings.GROQ_MODEL or os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+            logger.info(f"Initializing Groq LLM client with model: {model}")
             _llm_client = LLMClient(
                 provider=LLMProvider.GROQ,
                 api_key=groq_key,
-                model=os.getenv("GROQ_MODEL", "mixtral-8x7b-32768")
+                model=model
             )
-        else:
+        elif hf_key:
             # Fallback to HuggingFace
-            hf_key = os.getenv("HUGGINGFACE_API_KEY")
+            model = settings.HUGGINGFACE_MODEL or os.getenv("HUGGINGFACE_MODEL", "microsoft/Phi-3-mini-4k-instruct")
+            logger.info(f"Initializing HuggingFace LLM client with model: {model}")
             _llm_client = LLMClient(
                 provider=LLMProvider.HUGGINGFACE,
                 api_key=hf_key,
-                model=os.getenv("HUGGINGFACE_MODEL", "mistralai/Mistral-7B-Instruct-v0.3")
+                model=model
+            )
+        else:
+            logger.error("No LLM API key found! Set GROQ_API_KEY or HUGGINGFACE_API_KEY in .env")
+            # Create a client anyway (will fail on use but won't crash)
+            _llm_client = LLMClient(
+                provider=LLMProvider.GROQ,
+                api_key="",
+                model="llama-3.3-70b-versatile"
             )
 
     return _llm_client

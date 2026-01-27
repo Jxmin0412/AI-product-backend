@@ -89,6 +89,62 @@ class PriceComparisonResponse(BaseModel):
 
 
 # ============================================
+# NEW COMPARISON SCHEMAS (SmartScraper)
+# ============================================
+
+class PlatformComparison(BaseModel):
+    """Detailed comparison data for a single platform."""
+    platform: str
+    platformKey: Optional[str] = None
+    productUrl: str
+    platformProductId: Optional[str] = None
+    price: float
+    originalPrice: Optional[float] = None
+    discountPercent: Optional[float] = None
+    currency: str = "INR"
+    rating: Optional[float] = None
+    reviewCount: Optional[int] = None
+    availability: Optional[str] = None
+    seller: Optional[str] = None
+    shippingInfo: Optional[str] = None
+    deliveryEstimate: Optional[str] = None
+    priceScore: float = 0
+    ratingScore: float = 0
+    valueScore: float = 0
+    brandTrustScore: float = 0
+    comparisonRank: int
+    isBestDeal: bool = False
+
+
+class PriceRange(BaseModel):
+    """Price range for comparison."""
+    min: float
+    max: float
+
+
+class SmartComparisonResponse(BaseModel):
+    """Full comparison response from SmartScraper."""
+    productName: str
+    query: str
+    comparisons: List[PlatformComparison]
+    bestDeal: Optional[PlatformComparison] = None
+    priceRange: PriceRange
+    images: List[str] = []
+    recommendation: str
+    totalPlatforms: int
+
+
+class ProductImageResponse(BaseModel):
+    """Product image response."""
+    id: Optional[str] = None
+    imageUrl: str
+    imageType: str = "primary"
+    altText: Optional[str] = None
+    sourcePlatform: Optional[str] = None
+    displayOrder: int = 0
+
+
+# ============================================
 # HELPER FUNCTIONS
 # ============================================
 
@@ -334,3 +390,187 @@ async def get_categories():
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy", "service": "consumer-api"}
+
+
+# ============================================
+# NEW SMART COMPARISON ENDPOINTS
+# ============================================
+
+@router.get("/search/compare", response_model=SmartComparisonResponse)
+async def smart_compare_products(
+    query: str = Query(..., min_length=1, max_length=500, description="Product search query"),
+    platforms: Optional[str] = Query(
+        None,
+        description="Comma-separated platforms: amazon,flipkart,myntra,ajio,croma,reliance_digital"
+    ),
+):
+    """
+    Search and compare a product across multiple e-commerce platforms.
+
+    Uses LLM-powered extraction (Firecrawl-inspired) for intelligent scraping.
+    Returns comparison scores, best deal recommendation, and all platform prices.
+
+    Supported platforms:
+    - amazon: Amazon India
+    - flipkart: Flipkart
+    - myntra: Myntra (fashion)
+    - ajio: Ajio (fashion)
+    - croma: Croma (electronics)
+    - reliance_digital: Reliance Digital (electronics)
+
+    Example: /search/compare?query=iPhone 15&platforms=amazon,flipkart,croma
+    """
+    try:
+        logger.info(f"Smart comparison request: query='{query}', platforms={platforms}")
+
+        # Import SmartScraper
+        from services.smart_scraper import get_smart_scraper
+
+        scraper = get_smart_scraper()
+
+        # Parse platforms
+        platform_list = None
+        if platforms:
+            platform_list = [p.strip().lower() for p in platforms.split(",")]
+
+        # Run comparison
+        result = await scraper.compare_products(
+            query=query,
+            platforms=platform_list
+        )
+
+        # Convert to response models
+        comparisons = []
+        for comp in result.comparisons:
+            comparisons.append(PlatformComparison(
+                platform=comp.get("platform", "Unknown"),
+                platformKey=comp.get("platform_key"),
+                productUrl=comp.get("product_url") or comp.get("url", ""),
+                platformProductId=comp.get("platform_product_id"),
+                price=comp.get("price", 0),
+                originalPrice=comp.get("original_price"),
+                discountPercent=comp.get("discount_percent"),
+                currency=comp.get("currency", "INR"),
+                rating=comp.get("rating"),
+                reviewCount=comp.get("review_count"),
+                availability=comp.get("availability"),
+                seller=comp.get("seller"),
+                shippingInfo=comp.get("shipping"),
+                deliveryEstimate=comp.get("delivery_estimate"),
+                priceScore=comp.get("price_score", 0),
+                ratingScore=comp.get("rating_score", 0),
+                valueScore=comp.get("value_score", 0),
+                brandTrustScore=comp.get("brand_trust_score", 0),
+                comparisonRank=comp.get("comparison_rank", 0),
+                isBestDeal=comp.get("is_best_deal", False),
+            ))
+
+        # Best deal
+        best_deal = None
+        if result.best_deal:
+            best_deal = PlatformComparison(
+                platform=result.best_deal.get("platform", "Unknown"),
+                platformKey=result.best_deal.get("platform_key"),
+                productUrl=result.best_deal.get("product_url") or result.best_deal.get("url", ""),
+                platformProductId=result.best_deal.get("platform_product_id"),
+                price=result.best_deal.get("price", 0),
+                originalPrice=result.best_deal.get("original_price"),
+                discountPercent=result.best_deal.get("discount_percent"),
+                currency=result.best_deal.get("currency", "INR"),
+                rating=result.best_deal.get("rating"),
+                reviewCount=result.best_deal.get("review_count"),
+                availability=result.best_deal.get("availability"),
+                seller=result.best_deal.get("seller"),
+                shippingInfo=result.best_deal.get("shipping"),
+                deliveryEstimate=result.best_deal.get("delivery_estimate"),
+                priceScore=result.best_deal.get("price_score", 0),
+                ratingScore=result.best_deal.get("rating_score", 0),
+                valueScore=result.best_deal.get("value_score", 0),
+                brandTrustScore=result.best_deal.get("brand_trust_score", 0),
+                comparisonRank=1,
+                isBestDeal=True,
+            )
+
+        return SmartComparisonResponse(
+            productName=result.product_name,
+            query=result.query,
+            comparisons=comparisons,
+            bestDeal=best_deal,
+            priceRange=PriceRange(
+                min=result.price_range.get("min", 0),
+                max=result.price_range.get("max", 0)
+            ),
+            images=result.images,
+            recommendation=result.recommendation,
+            totalPlatforms=len(comparisons),
+        )
+
+    except Exception as e:
+        logger.error(f"Smart comparison error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Comparison failed: {str(e)}")
+
+
+@router.get("/platforms")
+async def get_supported_platforms():
+    """Get list of supported e-commerce platforms for comparison."""
+    from services.smart_scraper import PLATFORM_CONFIGS
+
+    platforms = []
+    for key, config in PLATFORM_CONFIGS.items():
+        platforms.append({
+            "id": key,
+            "name": config.name,
+            "baseUrl": config.base_url,
+            "trustScore": config.trust_score,
+            "currency": config.currency,
+            "categories": _get_platform_categories(key),
+        })
+
+    return {"platforms": platforms}
+
+
+def _get_platform_categories(platform: str) -> List[str]:
+    """Get supported categories for a platform."""
+    category_map = {
+        "amazon": ["Electronics", "Computers", "Smartphones", "Home", "Fashion", "Books"],
+        "flipkart": ["Electronics", "Computers", "Smartphones", "Home", "Fashion", "Appliances"],
+        "myntra": ["Fashion", "Footwear", "Accessories", "Beauty"],
+        "ajio": ["Fashion", "Footwear", "Accessories"],
+        "croma": ["Electronics", "Smartphones", "Computers", "Appliances", "Audio"],
+        "reliance_digital": ["Electronics", "Smartphones", "Computers", "Appliances", "Audio"],
+    }
+    return category_map.get(platform, ["General"])
+
+
+@router.get("/scrape/url")
+async def scrape_single_url(
+    url: str = Query(..., description="URL to scrape"),
+    platform: Optional[str] = Query(None, description="Platform hint (auto-detected if not provided)"),
+):
+    """
+    Scrape a single product URL with LLM-powered extraction.
+
+    Extracts structured product data from any supported e-commerce product page.
+    """
+    try:
+        logger.info(f"Single URL scrape: {url}")
+
+        from services.smart_scraper import get_smart_scraper
+
+        scraper = get_smart_scraper()
+        result = await scraper.scrape_url(url=url, platform=platform)
+
+        if not result:
+            raise HTTPException(status_code=404, detail="Could not extract product data from URL")
+
+        return {
+            "success": True,
+            "data": result,
+            "platform": result.get("platform", "unknown"),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"URL scrape error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Scraping failed: {str(e)}")

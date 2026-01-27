@@ -34,9 +34,89 @@ class Product(Base):
     # Relationships
     listings = relationship("ProductListing", back_populates="product", cascade="all, delete-orphan")
     recommendations = relationship("Recommendation", back_populates="product")
+    images = relationship("ProductImage", back_populates="product", cascade="all, delete-orphan")
+    comparisons = relationship("ProductComparison", back_populates="product", cascade="all, delete-orphan")
 
     def __repr__(self):
         return f"<Product(id={self.id}, name='{self.name}', category='{self.category}')>"
+
+
+class ProductImage(Base):
+    """Multiple images for a product from different sources/platforms."""
+    __tablename__ = "product_images"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    product_id = Column(UUID(as_uuid=True), ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+    image_url = Column(Text, nullable=False)
+    image_type = Column(String(50), default="primary")  # primary, gallery, thumbnail, zoom
+    alt_text = Column(String(500))
+    source_platform = Column(String(100))  # amazon, flipkart, myntra, etc.
+    display_order = Column(Integer, default=0)
+    width = Column(Integer)
+    height = Column(Integer)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    product = relationship("Product", back_populates="images")
+
+    __table_args__ = (
+        Index('idx_product_images_product_type', 'product_id', 'image_type'),
+    )
+
+    def __repr__(self):
+        return f"<ProductImage(id={self.id}, type='{self.image_type}', platform='{self.source_platform}')>"
+
+
+class ProductComparison(Base):
+    """Cross-platform product comparison with pricing and scoring."""
+    __tablename__ = "product_comparisons"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    product_id = Column(UUID(as_uuid=True), ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+    platform = Column(String(100), nullable=False, index=True)  # amazon, flipkart, myntra, ajio, croma, reliance_digital
+    product_url = Column(Text, nullable=False)
+    platform_product_id = Column(String(255))
+
+    # Pricing
+    price = Column(Numeric(12, 2), nullable=False)
+    original_price = Column(Numeric(12, 2))
+    currency = Column(String(10), default="INR")
+    discount_percent = Column(Numeric(5, 2))
+
+    # Ratings & Reviews
+    rating = Column(Numeric(3, 2))
+    review_count = Column(Integer, default=0)
+
+    # Availability & Shipping
+    availability = Column(String(50))
+    seller_name = Column(String(255))
+    shipping_info = Column(String(255))
+    delivery_estimate = Column(String(100))
+
+    # Comparison Scores (computed)
+    price_score = Column(Numeric(5, 2))       # 0-100: Lower price = higher score
+    rating_score = Column(Numeric(5, 2))      # 0-100: Higher rating = higher score
+    value_score = Column(Numeric(5, 2))       # 0-100: Combined price/rating score
+    brand_trust_score = Column(Numeric(5, 2)) # 0-100: Platform reliability score
+
+    # Ranking
+    is_best_deal = Column(Boolean, default=False)
+    comparison_rank = Column(Integer)  # 1 = best option
+
+    # Timestamps
+    scraped_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    product = relationship("Product", back_populates="comparisons")
+
+    __table_args__ = (
+        Index('idx_comparisons_product_platform', 'product_id', 'platform'),
+        Index('idx_comparisons_best_deal', 'is_best_deal', 'comparison_rank'),
+    )
+
+    def __repr__(self):
+        return f"<ProductComparison(platform='{self.platform}', price={self.price}, rank={self.comparison_rank})>"
 
 
 class ProductListing(Base):

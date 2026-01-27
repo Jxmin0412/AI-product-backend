@@ -1,6 +1,6 @@
 """
-Real web scraper for product data collection using Playwright.
-Handles JavaScript-rendered e-commerce pages.
+Real web scraper for product data collection using httpx.
+Compatible with Python 3.14 on Windows (no Playwright subprocess issues).
 """
 import asyncio
 import logging
@@ -10,19 +10,25 @@ from typing import Optional, Dict, Any, List
 from abc import ABC, abstractmethod
 from urllib.parse import quote_plus
 
-logger = logging.getLogger(__name__)
+import httpx
+from bs4 import BeautifulSoup
+import json
 
-# Try to import Playwright
-try:
-    from playwright.async_api import async_playwright, Browser, Page
-    PLAYWRIGHT_AVAILABLE = True
-except ImportError:
-    PLAYWRIGHT_AVAILABLE = False
-    logger.warning("Playwright not installed. Run: pip install playwright && playwright install chromium")
+logger = logging.getLogger(__name__)
 
 
 class BaseScraper(ABC):
     """Abstract base class for scrapers."""
+
+    # Common browser headers
+    HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
 
     @abstractmethod
     async def search_products(
@@ -35,26 +41,81 @@ class BaseScraper(ABC):
     ) -> List[Dict[str, Any]]:
         pass
 
+    async def _fetch_page(self, url: str, timeout: int = 30) -> Optional[str]:
+        """Fetch page HTML using httpx."""
+        try:
+            async with httpx.AsyncClient(
+                headers=self.HEADERS,
+                timeout=timeout,
+                follow_redirects=True
+            ) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                return response.text
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"HTTP error fetching {url}: {e.response.status_code}")
+            return None
+        except httpx.RequestError as e:
+            logger.warning(f"Request error fetching {url}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Page fetch error: {e}")
+            return None
+
+    def _extract_json_ld(self, html: str) -> List[Dict[str, Any]]:
+        """Extract JSON-LD structured data from HTML."""
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            json_ld_scripts = soup.find_all('script', {'type': 'application/ld+json'})
+
+            results = []
+            for script in json_ld_scripts:
+                try:
+                    data = json.loads(script.string)
+                    if isinstance(data, list):
+                        results.extend(data)
+                    else:
+                        results.append(data)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+            return results
+        except Exception as e:
+            logger.debug(f"JSON-LD extraction error: {e}")
+            return []
+
+    def _extract_embedded_json(self, html: str, pattern: str) -> List[Dict[str, Any]]:
+        """Extract JSON data embedded in script tags matching a pattern."""
+        try:
+            results = []
+            # Find all script tags
+            soup = BeautifulSoup(html, 'html.parser')
+            scripts = soup.find_all('script')
+
+            for script in scripts:
+                if script.string and pattern in script.string:
+                    # Try to find JSON objects in the script
+                    text = script.string
+                    # Look for JSON array or object
+                    json_matches = re.findall(r'\{[^{}]*"asin"[^{}]*\}', text)
+                    for match in json_matches[:10]:
+                        try:
+                            data = json.loads(match)
+                            results.append(data)
+                        except json.JSONDecodeError:
+                            continue
+
+            return results
+        except Exception as e:
+            logger.debug(f"Embedded JSON extraction error: {e}")
+            return []
+
 
 class AmazonScraper(BaseScraper):
     """Scraper for Amazon product search results."""
 
-    BASE_URL = "https://www.amazon.com"
-    SEARCH_URL = "https://www.amazon.com/s?k={query}"
-
-    # Selectors for Amazon search results
-    SELECTORS = {
-        "product_container": "[data-component-type='s-search-result']",
-        "product_name": "h2 a span",
-        "product_link": "h2 a",
-        "price_whole": ".a-price-whole",
-        "price_fraction": ".a-price-fraction",
-        "original_price": ".a-text-price .a-offscreen",
-        "rating": ".a-icon-star-small span.a-icon-alt",
-        "review_count": ".a-size-base.s-underline-text",
-        "image": ".s-image",
-        "prime": ".a-icon-prime",
-    }
+    BASE_URL = "https://www.amazon.in"
+    SEARCH_URL = "https://www.amazon.in/s?k={query}"
 
     async def search_products(
         self,
@@ -65,15 +126,8 @@ class AmazonScraper(BaseScraper):
         max_results: int = 20
     ) -> List[Dict[str, Any]]:
         """Scrape Amazon search results."""
-
-        if not PLAYWRIGHT_AVAILABLE:
-            logger.error("Playwright not available")
-            return []
-
-        products = []
         search_url = self.SEARCH_URL.format(query=quote_plus(query))
 
-        # Add price filters to URL if specified
         if min_price:
             search_url += f"&low-price={int(min_price)}"
         if max_price:
@@ -81,150 +135,180 @@ class AmazonScraper(BaseScraper):
 
         logger.info(f"Scraping Amazon: {search_url}")
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                viewport={"width": 1920, "height": 1080}
-            )
-            page = await context.new_page()
+        html_content = await self._fetch_page(search_url)
+        if not html_content:
+            logger.warning("Failed to fetch Amazon page - likely blocked")
+            return []
 
-            try:
-                # Navigate with retry
-                await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(2000)  # Wait for dynamic content
+        # Check if we got a CAPTCHA or blocked page
+        if "captcha" in html_content.lower() or len(html_content) < 1000:
+            logger.warning("Amazon returned CAPTCHA or blocked page")
+            return []
 
-                # Get all product containers
-                containers = await page.query_selector_all(self.SELECTORS["product_container"])
-
-                for container in containers[:max_results]:
-                    try:
-                        product = await self._parse_product(container, page)
-                        if product and product.get("name"):
-                            product["platform"] = "Amazon"
-                            product["category"] = category or "All"
-                            products.append(product)
-                    except Exception as e:
-                        logger.warning(f"Error parsing product: {e}")
-                        continue
-
-            except Exception as e:
-                logger.error(f"Amazon scraping error: {e}")
-            finally:
-                await browser.close()
+        products = self._extract_products_from_html(html_content, category, max_results)
 
         logger.info(f"Scraped {len(products)} products from Amazon")
         return products
 
-    async def _parse_product(self, container, page: Page) -> Optional[Dict[str, Any]]:
-        """Parse a single product from its container element."""
+    def _extract_products_from_html(
+        self,
+        html: str,
+        category: Optional[str],
+        max_results: int
+    ) -> List[Dict[str, Any]]:
+        """Extract products from HTML using BeautifulSoup."""
+        products = []
+
         try:
-            # Get ASIN (Amazon product ID)
-            asin = await container.get_attribute("data-asin")
-            if not asin:
-                return None
+            soup = BeautifulSoup(html, 'html.parser')
 
-            # Product name
-            name_elem = await container.query_selector(self.SELECTORS["product_name"])
-            name = await name_elem.inner_text() if name_elem else None
+            # Find all product containers
+            product_cards = soup.find_all('div', {'data-component-type': 's-search-result'})
 
-            # Product link
-            link_elem = await container.query_selector(self.SELECTORS["product_link"])
-            href = await link_elem.get_attribute("href") if link_elem else None
-            url = f"{self.BASE_URL}{href}" if href and not href.startswith("http") else href
+            if not product_cards:
+                product_cards = soup.find_all('div', {'data-asin': True, 'data-index': True})
 
-            # Price
-            price = await self._extract_price(container)
+            logger.info(f"Found {len(product_cards)} Amazon product cards")
 
-            # Original price (if discounted)
-            original_price = None
-            orig_elem = await container.query_selector(self.SELECTORS["original_price"])
-            if orig_elem:
-                orig_text = await orig_elem.inner_text()
-                original_price = self._parse_price_text(orig_text)
+            for card in product_cards[:max_results]:
+                try:
+                    asin = card.get('data-asin', '')
+                    if not asin or len(asin) != 10:
+                        continue
 
-            # Rating
-            rating = None
-            rating_elem = await container.query_selector(self.SELECTORS["rating"])
-            if rating_elem:
-                rating_text = await rating_elem.inner_text()
-                rating_match = re.search(r"(\d+\.?\d*)", rating_text)
-                if rating_match:
-                    rating = float(rating_match.group(1))
+                    # Build the product URL
+                    product_url = f"{self.BASE_URL}/dp/{asin}"
 
-            # Review count
-            review_count = None
-            review_elem = await container.query_selector(self.SELECTORS["review_count"])
-            if review_elem:
-                review_text = await review_elem.inner_text()
-                review_count = self._parse_number(review_text)
+                    product = {
+                        "platform_product_id": asin,
+                        "url": product_url,
+                        "platform": "Amazon",
+                        "category": category or "All",
+                        "currency": "INR",
+                    }
 
-            # Image
-            image_url = None
-            img_elem = await container.query_selector(self.SELECTORS["image"])
-            if img_elem:
-                image_url = await img_elem.get_attribute("src")
+                    # Extract product name - try multiple selectors
+                    name_elem = card.find('span', {'class': 'a-text-normal'})
+                    if not name_elem:
+                        name_elem = card.find('h2')
+                    if not name_elem:
+                        # Try finding any link with a title
+                        link_with_title = card.find('a', {'title': True})
+                        if link_with_title:
+                            product["name"] = link_with_title.get('title', '')
+                    if name_elem:
+                        product["name"] = name_elem.get_text(strip=True)
 
-            # Prime availability
-            prime_elem = await container.query_selector(self.SELECTORS["prime"])
-            has_prime = prime_elem is not None
+                    if not product.get("name"):
+                        continue  # Skip products without names
 
-            return {
-                "platform_product_id": asin,
-                "name": name,
-                "url": url,
-                "price": price,
-                "currency": "USD",
-                "original_price": original_price,
-                "rating": rating,
-                "review_count": review_count,
-                "image_url": image_url,
-                "availability": "In Stock" if price else "Unknown",
-                "shipping_cost": 0 if has_prime else None,
-                "delivery_days": 2 if has_prime else None,
-            }
+                    # Extract price - try multiple patterns
+                    price_whole = card.find('span', {'class': 'a-price-whole'})
+                    if price_whole:
+                        price_text = price_whole.get_text(strip=True).replace(',', '').replace('.', '')
+                        try:
+                            product["price"] = float(price_text)
+                        except ValueError:
+                            pass
+
+                    # Try alternative price selector (offscreen price)
+                    if "price" not in product:
+                        price_elem = card.find('span', {'class': 'a-offscreen'})
+                        if price_elem:
+                            price_text = price_elem.get_text(strip=True)
+                            price_match = re.search(r'[\d,]+\.?\d*', price_text.replace(',', ''))
+                            if price_match:
+                                try:
+                                    product["price"] = float(price_match.group())
+                                except ValueError:
+                                    pass
+
+                    # Try to find price anywhere in the card
+                    if "price" not in product:
+                        card_text = card.get_text()
+                        price_patterns = [
+                            r'₹\s*([\d,]+)',
+                            r'Rs\.?\s*([\d,]+)',
+                            r'INR\s*([\d,]+)',
+                        ]
+                        for pattern in price_patterns:
+                            price_match = re.search(pattern, card_text)
+                            if price_match:
+                                try:
+                                    product["price"] = float(price_match.group(1).replace(',', ''))
+                                    break
+                                except ValueError:
+                                    pass
+
+                    # Skip if no price found
+                    if "price" not in product:
+                        logger.debug(f"No price found for ASIN {asin}")
+                        continue
+
+                    # Extract original price
+                    orig_price_elem = card.find('span', {'class': 'a-price', 'data-a-strike': 'true'})
+                    if orig_price_elem:
+                        orig_text = orig_price_elem.get_text(strip=True)
+                        orig_match = re.search(r'[\d,]+\.?\d*', orig_text.replace(',', ''))
+                        if orig_match:
+                            try:
+                                product["original_price"] = float(orig_match.group())
+                            except ValueError:
+                                pass
+
+                    # Extract image - try multiple sources
+                    img_elem = card.find('img', {'class': 's-image'})
+                    if img_elem:
+                        img_src = img_elem.get('src', '') or img_elem.get('data-src', '')
+                        if img_src and img_src.startswith('http'):
+                            product["image_url"] = img_src
+
+                    # Also try to find any product image
+                    if not product.get("image_url"):
+                        all_imgs = card.find_all('img')
+                        for img in all_imgs:
+                            src = img.get('src', '') or img.get('data-src', '')
+                            if src and 'images' in src and src.startswith('http'):
+                                product["image_url"] = src
+                                break
+
+                    # Extract rating
+                    rating_elem = card.find('span', {'class': 'a-icon-alt'})
+                    if rating_elem:
+                        rating_text = rating_elem.get_text(strip=True)
+                        rating_match = re.search(r'([\d.]+)\s*out of\s*5', rating_text)
+                        if rating_match:
+                            try:
+                                product["rating"] = float(rating_match.group(1))
+                            except ValueError:
+                                pass
+
+                    # Extract review count
+                    review_elem = card.find('span', {'class': 'a-size-base', 'dir': 'auto'})
+                    if review_elem:
+                        review_text = review_elem.get_text(strip=True).replace(',', '')
+                        if review_text.isdigit():
+                            product["review_count"] = int(review_text)
+
+                    product["availability"] = "In Stock"
+                    products.append(product)
+
+                    logger.debug(f"Extracted Amazon product: {product.get('name', '')[:50]} - ₹{product.get('price')}")
+
+                except Exception as e:
+                    logger.debug(f"Error parsing Amazon product card: {e}")
+                    continue
 
         except Exception as e:
-            logger.warning(f"Error parsing product element: {e}")
-            return None
+            logger.error(f"Amazon extraction error: {e}")
 
-    async def _extract_price(self, container) -> Optional[float]:
-        """Extract price from product container."""
-        try:
-            whole_elem = await container.query_selector(self.SELECTORS["price_whole"])
-            if whole_elem:
-                whole_text = await whole_elem.inner_text()
-                whole = whole_text.replace(",", "").replace(".", "").strip()
+        # Log summary
+        if products:
+            logger.info(f"Successfully extracted {len(products)} products from Amazon with prices")
+        else:
+            logger.warning("Amazon: Found product cards but couldn't extract complete data (JS rendering required)")
 
-                frac_elem = await container.query_selector(self.SELECTORS["price_fraction"])
-                frac = "00"
-                if frac_elem:
-                    frac = await frac_elem.inner_text()
-
-                return float(f"{whole}.{frac}")
-        except Exception:
-            pass
-        return None
-
-    def _parse_price_text(self, text: str) -> Optional[float]:
-        """Parse price from text like '$1,299.99'."""
-        if not text:
-            return None
-        cleaned = re.sub(r"[^\d.]", "", text.replace(",", ""))
-        try:
-            return float(cleaned) if cleaned else None
-        except ValueError:
-            return None
-
-    def _parse_number(self, text: str) -> Optional[int]:
-        """Parse number from text like '1,234 reviews'."""
-        if not text:
-            return None
-        cleaned = re.sub(r"[^\d]", "", text.replace(",", ""))
-        try:
-            return int(cleaned) if cleaned else None
-        except ValueError:
-            return None
+        return products
 
 
 class FlipkartScraper(BaseScraper):
@@ -232,17 +316,6 @@ class FlipkartScraper(BaseScraper):
 
     BASE_URL = "https://www.flipkart.com"
     SEARCH_URL = "https://www.flipkart.com/search?q={query}"
-
-    SELECTORS = {
-        "product_container": "._1AtVbE",
-        "product_name": "._4rR01T, .s1Q9rs",
-        "product_link": "._1fQZEK, .s1Q9rs",
-        "price": "._30jeq3",
-        "original_price": "._3I9_wc",
-        "rating": "._3LWZlK",
-        "review_count": "._2_R_DZ span",
-        "image": "._396cs4, ._2r_T1I",
-    }
 
     async def search_products(
         self,
@@ -253,12 +326,6 @@ class FlipkartScraper(BaseScraper):
         max_results: int = 20
     ) -> List[Dict[str, Any]]:
         """Scrape Flipkart search results."""
-
-        if not PLAYWRIGHT_AVAILABLE:
-            logger.error("Playwright not available")
-            return []
-
-        products = []
         search_url = self.SEARCH_URL.format(query=quote_plus(query))
 
         if min_price:
@@ -268,121 +335,157 @@ class FlipkartScraper(BaseScraper):
 
         logger.info(f"Scraping Flipkart: {search_url}")
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                viewport={"width": 1920, "height": 1080}
-            )
-            page = await context.new_page()
+        html_content = await self._fetch_page(search_url)
+        if not html_content:
+            logger.warning("Failed to fetch Flipkart page - likely blocked")
+            return []
 
-            try:
-                await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(2000)
+        if len(html_content) < 1000:
+            logger.warning("Flipkart returned minimal content - likely blocked")
+            return []
 
-                # Close login popup if present
-                try:
-                    close_btn = await page.query_selector("button._2KpZ6l")
-                    if close_btn:
-                        await close_btn.click()
-                except:
-                    pass
-
-                # Get products
-                containers = await page.query_selector_all(self.SELECTORS["product_container"])
-
-                for container in containers[:max_results * 2]:  # Get extra, filter later
-                    try:
-                        product = await self._parse_flipkart_product(container)
-                        if product and product.get("name") and product.get("price"):
-                            product["platform"] = "Flipkart"
-                            product["category"] = category or "All"
-                            products.append(product)
-                            if len(products) >= max_results:
-                                break
-                    except Exception as e:
-                        continue
-
-            except Exception as e:
-                logger.error(f"Flipkart scraping error: {e}")
-            finally:
-                await browser.close()
+        products = self._extract_products_from_html(html_content, category, max_results)
 
         logger.info(f"Scraped {len(products)} products from Flipkart")
         return products
 
-    async def _parse_flipkart_product(self, container) -> Optional[Dict[str, Any]]:
-        """Parse a Flipkart product."""
+    def _extract_products_from_html(
+        self,
+        html: str,
+        category: Optional[str],
+        max_results: int
+    ) -> List[Dict[str, Any]]:
+        """Extract products from HTML using BeautifulSoup."""
+        products = []
+
         try:
-            # Name
-            name_elem = await container.query_selector(self.SELECTORS["product_name"])
-            name = await name_elem.inner_text() if name_elem else None
-            if not name:
-                return None
+            soup = BeautifulSoup(html, 'html.parser')
 
-            # Link
-            link_elem = await container.query_selector(self.SELECTORS["product_link"])
-            href = await link_elem.get_attribute("href") if link_elem else None
-            url = f"{self.BASE_URL}{href}" if href else None
+            # Find all product links with /p/ pattern
+            product_links = soup.find_all('a', href=re.compile(r'/[^/]+/p/'))
 
-            # Price
-            price_elem = await container.query_selector(self.SELECTORS["price"])
-            price = None
-            if price_elem:
-                price_text = await price_elem.inner_text()
-                price = self._parse_inr_price(price_text)
+            logger.info(f"Found {len(product_links)} Flipkart product links")
 
-            # Original price
-            orig_elem = await container.query_selector(self.SELECTORS["original_price"])
-            original_price = None
-            if orig_elem:
-                orig_text = await orig_elem.inner_text()
-                original_price = self._parse_inr_price(orig_text)
+            seen_pids = set()
 
-            # Rating
-            rating_elem = await container.query_selector(self.SELECTORS["rating"])
-            rating = None
-            if rating_elem:
-                rating_text = await rating_elem.inner_text()
+            for link in product_links[:max_results * 2]:  # Process more to filter out invalid ones
                 try:
-                    rating = float(rating_text)
-                except:
-                    pass
+                    href = link.get('href', '')
 
-            # Image
-            img_elem = await container.query_selector(self.SELECTORS["image"])
-            image_url = await img_elem.get_attribute("src") if img_elem else None
+                    # Extract product ID
+                    pid_match = re.search(r'/p/([a-zA-Z0-9]+)', href)
+                    if not pid_match:
+                        continue
 
-            return {
-                "platform_product_id": href.split("/")[-1] if href else None,
-                "name": name,
-                "url": url,
-                "price": price,
-                "currency": "INR",
-                "original_price": original_price,
-                "rating": rating,
-                "review_count": None,
-                "image_url": image_url,
-                "availability": "In Stock" if price else "Unknown",
-            }
+                    pid = pid_match.group(1)
+                    if pid in seen_pids:
+                        continue
+                    seen_pids.add(pid)
+
+                    full_url = f"{self.BASE_URL}{href}" if href.startswith('/') else href
+
+                    product = {
+                        "platform_product_id": pid,
+                        "url": full_url,
+                        "platform": "Flipkart",
+                        "category": category or "All",
+                        "currency": "INR",
+                    }
+
+                    # Navigate up to find the product card container
+                    parent = link
+                    for _ in range(6):
+                        if parent.parent:
+                            parent = parent.parent
+                        else:
+                            break
+
+                    # Extract product name
+                    # Flipkart uses various class names, try multiple approaches
+                    name_elem = link.find('div', {'class': True})
+                    if name_elem:
+                        name_text = name_elem.get_text(strip=True)
+                        if len(name_text) > 5:
+                            product["name"] = name_text[:200]
+
+                    if not product.get("name"):
+                        title = link.get('title', '')
+                        if title:
+                            product["name"] = title
+
+                    # If still no name, try finding any text element with reasonable length
+                    if not product.get("name"):
+                        for elem in link.find_all(['div', 'span']):
+                            text = elem.get_text(strip=True)
+                            if 10 < len(text) < 200:
+                                product["name"] = text
+                                break
+
+                    if not product.get("name"):
+                        continue  # Skip products without names
+
+                    # Extract price from parent container
+                    parent_text = parent.get_text() if parent else ""
+                    price_pattern = re.compile(r'₹\s*([\d,]+)')
+                    price_matches = price_pattern.findall(parent_text)
+
+                    if price_matches:
+                        try:
+                            product["price"] = float(price_matches[0].replace(',', ''))
+                            if len(price_matches) > 1:
+                                orig = float(price_matches[1].replace(',', ''))
+                                if orig > product["price"]:
+                                    product["original_price"] = orig
+                        except ValueError:
+                            pass
+
+                    if "price" not in product:
+                        continue  # Skip products without price
+
+                    # Extract image
+                    img_elem = parent.find('img') if parent else link.find('img')
+                    if img_elem:
+                        img_src = img_elem.get('src', '') or img_elem.get('data-src', '')
+                        if img_src and 'http' in img_src:
+                            product["image_url"] = img_src
+
+                    # Extract rating
+                    if parent:
+                        rating_match = re.search(r'(\d\.?\d?)\s*★', parent.get_text())
+                        if rating_match:
+                            try:
+                                product["rating"] = float(rating_match.group(1))
+                            except ValueError:
+                                pass
+
+                    product["availability"] = "In Stock"
+                    products.append(product)
+
+                    logger.debug(f"Extracted Flipkart product: {product.get('name', '')[:50]} - ₹{product.get('price')}")
+
+                    if len(products) >= max_results:
+                        break
+
+                except Exception as e:
+                    logger.debug(f"Error parsing Flipkart product: {e}")
+                    continue
 
         except Exception as e:
-            return None
+            logger.error(f"Flipkart extraction error: {e}")
 
-    def _parse_inr_price(self, text: str) -> Optional[float]:
-        """Parse INR price from text like '₹1,299'."""
-        if not text:
-            return None
-        cleaned = re.sub(r"[^\d]", "", text)
-        try:
-            return float(cleaned) if cleaned else None
-        except ValueError:
-            return None
+        # Log summary
+        if products:
+            logger.info(f"Successfully extracted {len(products)} products from Flipkart with prices")
+        else:
+            logger.warning("Flipkart: Found product links but couldn't extract complete data (JS rendering required)")
+
+        return products
 
 
 class ScraperClient:
     """
     Main scraper client that orchestrates scraping from multiple platforms.
+    Uses httpx for HTTP requests (compatible with Python 3.14).
     """
 
     def __init__(self):
@@ -438,14 +541,80 @@ class ScraperClient:
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for result in results:
+        for i, result in enumerate(results):
             if isinstance(result, list):
                 all_products.extend(result)
             elif isinstance(result, Exception):
-                logger.error(f"Scraping error: {result}")
+                platform_name = platforms[i] if i < len(platforms) else "unknown"
+                logger.error(f"Scraping error for {platform_name}: {type(result).__name__}: {result}")
 
         logger.info(f"Total products scraped: {len(all_products)}")
+
+        # If no products found, return demo data with a note
+        if not all_products:
+            logger.warning("No products scraped - e-commerce sites may have changed their HTML structure")
+            logger.info("Returning demo data for demonstration purposes")
+            all_products = self._get_demo_products(query, category)
+
         return all_products[:max_results]
+
+    def _get_demo_products(self, query: str, category: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return demo products when scraping fails."""
+        logger.warning(f"Returning demo products for '{query}' - all scrapers were blocked")
+
+        base_price = random.randint(15000, 75000)
+
+        demo_data = [
+            {
+                "platform_product_id": "DEMO001",
+                "name": f"[DEMO] {query.title()} - Premium Model",
+                "url": None,
+                "price": base_price,
+                "currency": "INR",
+                "original_price": base_price + random.randint(5000, 15000),
+                "rating": round(random.uniform(4.2, 4.8), 1),
+                "review_count": random.randint(500, 5000),
+                "image_url": None,
+                "availability": "Demo Data",
+                "platform": "Demo Mode",
+                "category": category or "Electronics",
+                "description": None,
+                "is_demo": True,
+            },
+            {
+                "platform_product_id": "DEMO002",
+                "name": f"[DEMO] {query.title()} - Standard Edition",
+                "url": None,
+                "price": base_price - random.randint(3000, 8000),
+                "currency": "INR",
+                "original_price": base_price,
+                "rating": round(random.uniform(4.0, 4.5), 1),
+                "review_count": random.randint(200, 2000),
+                "image_url": None,
+                "availability": "Demo Data",
+                "platform": "Demo Mode",
+                "category": category or "Electronics",
+                "description": None,
+                "is_demo": True,
+            },
+            {
+                "platform_product_id": "DEMO003",
+                "name": f"[DEMO] {query.title()} - Budget Option",
+                "url": None,
+                "price": base_price - random.randint(8000, 15000),
+                "currency": "INR",
+                "original_price": None,
+                "rating": round(random.uniform(3.8, 4.3), 1),
+                "review_count": random.randint(100, 1000),
+                "image_url": None,
+                "availability": "Demo Data",
+                "platform": "Demo Mode",
+                "category": category or "Electronics",
+                "description": None,
+                "is_demo": True,
+            },
+        ]
+        return demo_data
 
     async def search_single_platform(
         self,
