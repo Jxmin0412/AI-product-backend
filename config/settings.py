@@ -20,7 +20,8 @@ load_dotenv(_ENV_FILE, override=True)
 
 _logger = logging.getLogger(__name__)
 _logger.info(f"Loaded .env from: {_ENV_FILE}")
-_logger.info(f"GROQ_API_KEY in env: {bool(os.getenv('GROQ_API_KEY'))}")
+_logger.info(f"HUGGINGFACE_API_KEY in env: {bool(os.getenv('HUGGINGFACE_API_KEY'))}")
+_logger.info(f"HUGGINGFACE_MODEL in env: {os.getenv('HUGGINGFACE_MODEL', 'not set')}")
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
@@ -47,13 +48,13 @@ class Settings(BaseSettings):
     DB_POOL_PRE_PING: bool = Field(default=True)
     DB_ECHO_POOL: bool = Field(default=False)
 
-    # Groq API (Preferred - Fast & Free)
+    # HuggingFace API (Primary - OpenAI-compatible router)
+    HUGGINGFACE_API_KEY: str = Field(default="")
+    HUGGINGFACE_MODEL: str = Field(default="meta-llama/Llama-3.1-8B-Instruct:novita")
+
+    # Groq API (Fallback)
     GROQ_API_KEY: str = Field(default="")
     GROQ_MODEL: str = Field(default="llama-3.3-70b-versatile")
-
-    # Hugging Face API (Fallback)
-    HUGGINGFACE_API_KEY: str = Field(default="")
-    HUGGINGFACE_MODEL: str = Field(default="microsoft/Phi-3-mini-4k-instruct")
 
     # Redis Configuration
     REDIS_URL: str = Field(default="redis://localhost:6379/0")
@@ -106,5 +107,6 @@ settings = Settings()
 
 # Debug: print loaded values on import
 _logger.info(f"Settings initialized:")
-_logger.info(f"  GROQ_API_KEY loaded: {bool(settings.GROQ_API_KEY)} (length: {len(settings.GROQ_API_KEY) if settings.GROQ_API_KEY else 0})")
-_logger.info(f"  GROQ_MODEL: {settings.GROQ_MODEL}")
+_logger.info(f"  HUGGINGFACE_API_KEY loaded: {bool(settings.HUGGINGFACE_API_KEY)} (length: {len(settings.HUGGINGFACE_API_KEY) if settings.HUGGINGFACE_API_KEY else 0})")
+_logger.info(f"  HUGGINGFACE_MODEL: {settings.HUGGINGFACE_MODEL}")
+_logger.info(f"  GROQ_API_KEY loaded: {bool(settings.GROQ_API_KEY)}")
