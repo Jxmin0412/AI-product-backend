@@ -9,42 +9,36 @@ dependencies = [
     "uvicorn[standard]>=0.27.0",
     "pydantic>=2.5.3",
     "pydantic-settings>=2.1.0",
-
     # Database
     "psycopg2-binary>=2.9.9",
     "sqlalchemy>=2.0.25",
     "alembic>=1.13.1",
-
     # LLM & AI
     "langchain>=0.1.4",
     "langchain-community>=0.0.16",
     "langgraph>=0.0.20",
     "huggingface-hub>=0.20.3",
     "sentence-transformers>=2.3.1",
-
     # Web Scraping
     "beautifulsoup4>=4.12.3",
     "lxml>=5.1.0",
     "requests>=2.31.0",
     "playwright>=1.41.0",
-
     # Data Processing
     "pandas>=2.2.0",
     "numpy>=1.26.3",
-
     # Caching & Background Tasks
     "redis>=5.0.1",
     "celery>=5.3.6",
-
     # Utilities
     "python-dotenv>=1.0.1",
     "python-multipart>=0.0.6",
     "httpx>=0.26.0",
-
     # Authentication
     "python-jose[cryptography]>=3.3.0",
     "bcrypt>=4.0.0",
     "email-validator>=2.0.0",
+    "slowapi>=0.1.9",
 ]
 
 [project.optional-dependencies]

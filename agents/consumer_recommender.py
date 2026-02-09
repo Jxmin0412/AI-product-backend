@@ -2,7 +2,9 @@
 Agent 4: Consumer Recommender Agent
 Ranks products and generates personalized recommendations with explanations.
 """
+import json
 import logging
+import re
 from typing import List, Dict, Any, Optional, Tuple
 import math
 
@@ -80,19 +82,43 @@ class ConsumerRecommenderAgent(BaseAgent):
             # Step 3: Select top recommendations
             top_products = ranked[:self.TOP_RECOMMENDATIONS]
 
-            # Step 4: Generate explanations
-            recommendations = []
-            for i, product in enumerate(top_products):
-                recommendation = await self._create_recommendation(
-                    product=product,
-                    rank=i + 1,
-                    state=state
-                )
-                recommendations.append(recommendation)
+            # Step 4: Generate explanations — batch into single LLM call
+            use_batch = True
+            try:
+                from config.settings import settings
+                use_batch = getattr(settings, "USE_BATCH_RECOMMENDATIONS", True)
+            except Exception:
+                pass
 
-                # Store reason in state
-                product_id = product.get("platform_product_id") or product.get("name", "")
-                state.recommendation_reasons[product_id] = recommendation.get("reason", "")
+            if use_batch and top_products:
+                logger.info(
+                    f"Batch generating reasons for {len(top_products)} products (1 LLM call)"
+                )
+                batch_reasons = await self._generate_reasons_batch(top_products, state)
+
+                recommendations = []
+                for i, product in enumerate(top_products):
+                    pid = product.get("platform_product_id") or product.get("name", "")
+                    reason = batch_reasons.get(str(i + 1)) or self._generate_fallback_reason(product, state)
+
+                    recommendation = {
+                        **product,
+                        "rank": i + 1,
+                        "reason": reason,
+                        "match_type": self._determine_match_type(product, state),
+                    }
+                    recommendations.append(recommendation)
+                    state.recommendation_reasons[pid] = reason
+            else:
+                # Fallback: individual LLM calls (original path)
+                recommendations = []
+                for i, product in enumerate(top_products):
+                    recommendation = await self._create_recommendation(
+                        product=product, rank=i + 1, state=state
+                    )
+                    recommendations.append(recommendation)
+                    pid = product.get("platform_product_id") or product.get("name", "")
+                    state.recommendation_reasons[pid] = recommendation.get("reason", "")
 
             state.recommendations = recommendations
 
@@ -291,6 +317,60 @@ class ConsumerRecommenderAgent(BaseAgent):
         except Exception as e:
             logger.warning(f"LLM reason generation failed: {e}")
             return None
+
+    async def _generate_reasons_batch(
+        self,
+        products: List[Dict[str, Any]],
+        state: AgentState,
+    ) -> Dict[str, str]:
+        """Generate recommendation reasons for all products in a single LLM call."""
+        try:
+            preferences = []
+            if state.extracted_price_range and state.extracted_price_range[1]:
+                preferences.append(f"Budget: under ₹{state.extracted_price_range[1]}")
+            if state.extracted_brand:
+                preferences.append(f"Brand: {state.extracted_brand}")
+            if state.extracted_features:
+                preferences.append(f"Features: {', '.join(state.extracted_features)}")
+
+            products_block = []
+            for i, p in enumerate(products, 1):
+                products_block.append(
+                    f"Product {i}: {p.get('name', 'Unknown')} | "
+                    f"₹{p.get('price', 0)} | "
+                    f"Rating {p.get('rating', 'N/A')}/5 | "
+                    f"{p.get('review_count', 0)} reviews"
+                )
+
+            prompt = (
+                "For the user query and products below, give a concise one-line "
+                "recommendation reason (max 15 words) for each product.\n\n"
+                f"Query: {state.user_query}\n"
+                f"Preferences: {'; '.join(preferences) or 'None'}\n\n"
+                + "\n".join(products_block)
+                + "\n\nReturn ONLY a JSON object mapping product number to reason, e.g.:\n"
+                '{"1": "reason", "2": "reason"}\n\nJSON:'
+            )
+
+            response = await self.generate_text(
+                prompt=prompt, max_tokens=500, temperature=0.7
+            )
+
+            if not response:
+                return {}
+
+            # Parse JSON from response
+            try:
+                return json.loads(response.strip())
+            except json.JSONDecodeError:
+                match = re.search(r"\{[^{}]+\}", response, re.DOTALL)
+                if match:
+                    return json.loads(match.group())
+            return {}
+
+        except Exception as e:
+            logger.warning(f"Batch reason generation failed: {e}")
+            return {}
 
     def _generate_fallback_reason(self, product: Dict[str, Any], state: AgentState) -> str:
         """

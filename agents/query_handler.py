@@ -43,39 +43,47 @@ class QueryHandlerAgent(BaseAgent):
     async def process(self, state: AgentState) -> AgentState:
         """
         Extract product name, category, price range, features from user query.
-        Uses LLM first, falls back to rule-based extraction on failure.
+        Uses rule-based extraction by default (cost-optimized).
+        LLM extraction available via USE_LLM_QUERY_EXTRACTION setting.
         """
         self.log_start(state)
 
         try:
             query = state.user_query
 
-            # Try LLM extraction first
-            extracted = await self._extract_with_llm(query)
+            # Cost optimization: use rule-based extraction by default.
+            # The regex/keyword approach handles price ranges, categories,
+            # brands, and features reliably without an LLM call.
+            use_llm = False
+            try:
+                from config.settings import settings
+                use_llm = getattr(settings, "USE_LLM_QUERY_EXTRACTION", False)
+            except Exception:
+                pass
 
-            if extracted:
-                # LLM extraction succeeded
-                state.extracted_product_name = extracted.get("product_type", query)
-                state.extracted_category = extracted.get("category", "All")
-                state.extracted_brand = extracted.get("brand")
-                state.extracted_features = extracted.get("features", [])
-                state.query_intent = extracted.get("intent", "product_search")
-
-                min_price = extracted.get("min_price")
-                max_price = extracted.get("max_price")
-                state.extracted_price_range = (min_price, max_price)
-
-                logger.info(f"LLM extraction successful for: {query[:50]}")
+            if use_llm:
+                extracted = await self._extract_with_llm(query)
+                if extracted:
+                    state.extracted_product_name = extracted.get("product_type", query)
+                    state.extracted_category = extracted.get("category", "All")
+                    state.extracted_brand = extracted.get("brand")
+                    state.extracted_features = extracted.get("features", [])
+                    state.query_intent = extracted.get("intent", "product_search")
+                    min_price = extracted.get("min_price")
+                    max_price = extracted.get("max_price")
+                    state.extracted_price_range = (min_price, max_price)
+                    logger.info(f"LLM extraction successful for: {query[:50]}")
+                else:
+                    logger.info(f"LLM failed, using rule-based for: {query[:50]}")
+                    await self._extract_rule_based(state)
             else:
-                # Fallback to rule-based extraction
-                logger.info(f"Falling back to rule-based extraction for: {query[:50]}")
+                logger.info(f"Rule-based extraction (LLM skipped): {query[:50]}")
                 await self._extract_rule_based(state)
 
             self._log_extraction_results(state)
 
         except Exception as e:
             self.log_error(e, state)
-            # Even on error, try rule-based extraction
             await self._extract_rule_based(state)
 
         self.log_end(state)

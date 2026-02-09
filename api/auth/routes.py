@@ -3,6 +3,9 @@ from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
 from sqlalchemy.orm import Session
 import logging
 
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
 from database.connection import get_db
 from services.auth_service import AuthService
 from api.auth.requests import RegisterRequest, LoginRequest
@@ -19,6 +22,7 @@ from entities.user import User
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
+limiter = Limiter(key_func=get_remote_address)
 router = APIRouter()
 
 
@@ -28,19 +32,21 @@ def get_auth_service(db: Session = Depends(get_db)) -> AuthService:
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("3/minute")
 async def register(
-    request: RegisterRequest,
+    request: Request,
+    register_request: RegisterRequest,
     auth_service: AuthService = Depends(get_auth_service)
 ):
     """Register a new user."""
-    if auth_service.get_user_by_email(request.email):
+    if auth_service.get_user_by_email(register_request.email):
         raise HTTPException(status_code=400, detail="Email already registered")
 
     user = auth_service.create_user(
-        email=request.email,
-        first_name=request.first_name,
-        last_name=request.last_name,
-        password=request.password
+        email=register_request.email,
+        first_name=register_request.first_name,
+        last_name=register_request.last_name,
+        password=register_request.password
     )
     logger.info(f"New user registered: {user.email}")
     return user
@@ -60,6 +66,7 @@ async def get_all_users(
 
 
 @router.post("/login", response_model=TokenResponse)
+@limiter.limit("5/minute")
 async def login(
     login_request: LoginRequest,
     request: Request,
@@ -84,9 +91,9 @@ async def login(
         value=raw_refresh_token,
         httponly=True,
         secure=settings.ENVIRONMENT == "production",
-        samesite="lax",
+        samesite="strict",
         max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
-        path="/api/auth"
+        path="/api/auth/refresh"
     )
 
     logger.info(f"User logged in: {user.email}")
@@ -97,6 +104,7 @@ async def login(
 
 
 @router.post("/refresh", response_model=TokenResponse)
+@limiter.limit("10/minute")
 async def refresh_token(
     request: Request,
     response: Response,
@@ -116,9 +124,9 @@ async def refresh_token(
         value=new_raw_token,
         httponly=True,
         secure=settings.ENVIRONMENT == "production",
-        samesite="lax",
+        samesite="strict",
         max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
-        path="/api/auth"
+        path="/api/auth/refresh"
     )
 
     return TokenResponse(
@@ -144,7 +152,7 @@ async def logout(
     # End login session
     auth_service.end_login_session(str(current_user.id))
 
-    response.delete_cookie(key="refresh_token", path="/api/auth")
+    response.delete_cookie(key="refresh_token", path="/api/auth/refresh")
     logger.info(f"User logged out: {current_user.email}")
     return MessageResponse(message="Successfully logged out")
 

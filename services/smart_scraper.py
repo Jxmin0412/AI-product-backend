@@ -28,6 +28,7 @@ except ImportError:
     logger.warning("html2text not installed. Run: pip install html2text")
 
 from utils.llm_client import get_llm_client, LLMClient
+from utils.rate_limiter import ScrapingRateLimiter
 
 
 # ============================================
@@ -221,6 +222,12 @@ class SmartScraper:
         "Upgrade-Insecure-Requests": "1",
     }
 
+    # Platforms that have CSS parsers — never use LLM for these
+    CSS_PARSED_PLATFORMS = {"amazon", "flipkart"}
+
+    # Platforms where LLM extraction is allowed as fallback
+    LLM_ALLOWED_PLATFORMS = {"myntra", "ajio", "croma", "reliance_digital"}
+
     def __init__(self, llm_client: Optional[LLMClient] = None):
         """
         Initialize SmartScraper.
@@ -231,6 +238,15 @@ class SmartScraper:
         self.llm_client = llm_client or get_llm_client()
         self.platforms = PLATFORM_CONFIGS
         self.extraction_schema = ProductExtractionSchema()
+
+        # Scraping rate limiter — enforces delay between requests to same domain
+        scraping_delay = 2.0
+        try:
+            from config.settings import settings
+            scraping_delay = float(getattr(settings, "SCRAPING_DELAY", 2))
+        except Exception:
+            pass
+        self.scraping_limiter = ScrapingRateLimiter(default_delay=scraping_delay)
 
         # HTML to text converter settings
         if HTML2TEXT_AVAILABLE:
@@ -483,19 +499,18 @@ class SmartScraper:
                 logger.warning(f"Content too short from {platform}, likely blocked")
                 return []
 
-            # Try platform-specific extraction first (more reliable)
+            # Try platform-specific CSS extraction first (no LLM cost)
             products = []
             if platform == "amazon":
                 products = self._extract_amazon_products(html_content, config.base_url)
             elif platform == "flipkart":
                 products = self._extract_flipkart_products(html_content, config.base_url)
 
-            # If platform-specific extraction found products, use them
             if products:
-                logger.info(f"Extracted {len(products)} products from {platform} using HTML parsing")
-            else:
-                # Fallback to LLM extraction
-                logger.info(f"Falling back to LLM extraction for {platform}")
+                logger.info(f"Extracted {len(products)} from {platform} via CSS (0 LLM calls)")
+            elif platform in self.LLM_ALLOWED_PLATFORMS:
+                # LLM fallback only for platforms without CSS parsers
+                logger.info(f"Using LLM extraction for {platform} (no CSS parser)")
                 markdown_content = self._html_to_markdown(html_content)
                 max_chars = 20000
                 if len(markdown_content) > max_chars:
@@ -507,6 +522,8 @@ class SmartScraper:
                     query=query,
                     base_url=config.base_url
                 )
+            else:
+                logger.info(f"CSS extraction returned 0 results for {platform}, LLM skipped")
 
             # Add platform info and filter
             valid_products = []
@@ -875,8 +892,13 @@ class SmartScraper:
     # ============================================
 
     async def _fetch_page(self, url: str, timeout: int = 30) -> Optional[str]:
-        """Fetch page HTML using httpx."""
+        """Fetch page HTML using httpx with per-domain rate limiting."""
         try:
+            # Enforce per-domain scraping delay
+            from urllib.parse import urlparse
+            domain = urlparse(url).netloc
+            await self.scraping_limiter.acquire(domain)
+
             async with httpx.AsyncClient(
                 headers=self.HEADERS,
                 timeout=timeout,
