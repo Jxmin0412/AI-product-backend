@@ -1,0 +1,319 @@
+// AI Product Curator - Database Schema
+// Generated from SQLAlchemy models
+
+// ============================================
+// CONSUMER-FACING TABLES
+// ============================================
+
+Table products {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  name varchar(500) [not null]
+  category varchar(100) [not null]
+  description text
+  image_url text
+  created_at timestamptz [default: `now()`]
+  updated_at timestamptz [default: `now()`]
+
+  indexes {
+    category
+  }
+}
+
+Table product_images {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  product_id uuid [not null, ref: > products.id]
+  image_url text [not null]
+  image_type varchar(50) [default: 'primary', note: 'primary, gallery, thumbnail, zoom']
+  alt_text varchar(500)
+  source_platform varchar(100) [note: 'amazon, flipkart, myntra, etc.']
+  display_order integer [default: 0]
+  width integer
+  height integer
+  created_at timestamptz [default: `now()`]
+
+  indexes {
+    product_id
+    (product_id, image_type) [name: 'idx_product_images_product_type']
+  }
+}
+
+Table product_comparisons {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  product_id uuid [not null, ref: > products.id]
+  platform varchar(100) [not null, note: 'amazon, flipkart, myntra, ajio, croma, reliance_digital']
+  product_url text [not null]
+  platform_product_id varchar(255)
+
+  // Pricing
+  price decimal(12,2) [not null]
+  original_price decimal(12,2)
+  currency varchar(10) [default: 'INR']
+  discount_percent decimal(5,2)
+
+  // Ratings & Reviews
+  rating decimal(3,2)
+  review_count integer [default: 0]
+
+  // Availability & Shipping
+  availability varchar(50)
+  seller_name varchar(255)
+  shipping_info varchar(255)
+  delivery_estimate varchar(100)
+
+  // Comparison Scores (computed)
+  price_score decimal(5,2) [note: '0-100: Lower price = higher score']
+  rating_score decimal(5,2) [note: '0-100: Higher rating = higher score']
+  value_score decimal(5,2) [note: '0-100: Combined price/rating score']
+  brand_trust_score decimal(5,2) [note: '0-100: Platform reliability score']
+
+  // Ranking
+  is_best_deal boolean [default: false]
+  comparison_rank integer [note: '1 = best option']
+
+  // Timestamps
+  scraped_at timestamptz [default: `now()`]
+  updated_at timestamptz [default: `now()`]
+
+  indexes {
+    product_id
+    platform
+    (product_id, platform) [name: 'idx_comparisons_product_platform']
+    (is_best_deal, comparison_rank) [name: 'idx_comparisons_best_deal']
+  }
+}
+
+Table product_listings {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  product_id uuid [not null, ref: > products.id]
+  platform varchar(100) [not null]
+  platform_product_id varchar(255)
+  url text [not null]
+  price decimal(12,2) [not null]
+  original_price decimal(12,2)
+  currency varchar(10) [default: 'INR']
+  rating decimal(3,2)
+  review_count integer [default: 0]
+  availability varchar(50)
+  shipping_cost decimal(10,2) [default: 0.00]
+  is_active boolean [default: true]
+  scraped_at timestamptz [default: `now()`]
+  updated_at timestamptz [default: `now()`]
+
+  indexes {
+    product_id
+    platform
+    price
+    scraped_at
+    (product_id, platform) [name: 'idx_listings_product_platform']
+    (is_active, price) [name: 'idx_listings_active_price']
+  }
+}
+
+Table price_history {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  listing_id uuid [not null, ref: > product_listings.id]
+  price decimal(12,2) [not null]
+  original_price decimal(12,2)
+  availability varchar(50)
+  recorded_at timestamptz [default: `now()`]
+
+  indexes {
+    listing_id
+    recorded_at
+  }
+}
+
+Table user_searches {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  query_text text [not null]
+  extracted_product_name varchar(500)
+  extracted_category varchar(100)
+  extracted_min_price decimal(12,2)
+  extracted_max_price decimal(12,2)
+  results_count integer
+  session_id varchar(255)
+  searched_at timestamptz [default: `now()`]
+
+  indexes {
+    extracted_category
+    searched_at
+  }
+}
+
+Table recommendations {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  search_id uuid [ref: > user_searches.id]
+  product_id uuid [ref: > products.id]
+  listing_id uuid [ref: > product_listings.id]
+  rank integer [not null]
+  score decimal(5,4)
+  reason text
+  created_at timestamptz [default: `now()`]
+
+  indexes {
+    search_id
+    rank
+  }
+}
+
+// ============================================
+// BUSINESS INTELLIGENCE TABLES
+// ============================================
+
+Table market_metrics {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  category varchar(100) [not null]
+  metric_type varchar(100) [not null]
+  metric_value decimal(15,2)
+  extra_data jsonb
+  period_start timestamptz
+  period_end timestamptz
+  calculated_at timestamptz [default: `now()`]
+
+  indexes {
+    category
+    metric_type
+    (period_start, period_end) [name: 'idx_market_metrics_period']
+  }
+}
+
+Table competitive_analysis {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  category varchar(100) [not null]
+  platform varchar(100) [not null]
+  avg_price decimal(12,2)
+  min_price decimal(12,2)
+  max_price decimal(12,2)
+  product_count integer
+  avg_rating decimal(3,2)
+  market_share decimal(5,2)
+  analysis_date date
+  created_at timestamptz [default: `now()`]
+
+  indexes {
+    category
+    platform
+    analysis_date
+  }
+}
+
+Table business_insights {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  insight_type varchar(100) [not null]
+  category varchar(100)
+  title varchar(500) [not null]
+  description text [not null]
+  confidence_score decimal(5,4)
+  impact_level varchar(50)
+  data_sources jsonb
+  generated_at timestamptz [default: `now()`]
+  is_active boolean [default: true]
+
+  indexes {
+    insight_type
+    category
+    generated_at
+  }
+}
+
+Table search_trends {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  keyword varchar(500) [not null]
+  category varchar(100)
+  search_count integer [default: 0]
+  trend_date date [not null]
+  created_at timestamptz [default: `now()`]
+
+  indexes {
+    keyword
+    category
+    trend_date
+  }
+}
+
+Table customer_journey {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  session_id varchar(255) [not null]
+  stage varchar(50) [not null]
+  product_id uuid [ref: > products.id]
+  listing_id uuid [ref: > product_listings.id]
+  action varchar(100)
+  extra_data jsonb
+  occurred_at timestamptz [default: `now()`]
+
+  indexes {
+    session_id
+    stage
+    occurred_at
+  }
+}
+
+// ============================================
+// UTILITY TABLES
+// ============================================
+
+Table scraping_jobs {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  job_type varchar(100) [not null]
+  platform varchar(100)
+  query_params jsonb
+  status varchar(50) [default: 'pending']
+  results_count integer [default: 0]
+  error_message text
+  started_at timestamptz
+  completed_at timestamptz
+  created_at timestamptz [default: `now()`]
+
+  indexes {
+    platform
+    status
+    created_at
+  }
+}
+
+// ============================================
+// AUTH TABLES
+// ============================================
+
+Table users {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  email varchar(255) [unique, not null]
+  first_name varchar(100) [not null]
+  last_name varchar(100) [not null]
+  hashed_password varchar(255) [not null]
+  is_active boolean [default: true]
+  created_at timestamptz [default: `now()`]
+  updated_at timestamptz [default: `now()`]
+  last_login timestamptz
+
+  indexes {
+    email
+  }
+}
+
+Table refresh_tokens {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  user_id uuid [not null, ref: > users.id]
+  token_hash varchar(255) [unique, not null]
+  expires_at timestamptz [not null]
+  created_at timestamptz [default: `now()`]
+  revoked boolean [default: false]
+
+  indexes {
+    user_id
+  }
+}
+
+Table login_sessions {
+  id uuid [pk, default: `uuid_generate_v4()`]
+  user_id uuid [not null, ref: > users.id]
+  login_at timestamptz [default: `now()`]
+  logout_at timestamptz
+  ip_address varchar(45) [note: 'Supports IPv6']
+  user_agent varchar(500)
+  is_active boolean [default: true]
+
+  indexes {
+    user_id
+  }
+}

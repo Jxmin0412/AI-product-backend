@@ -2,17 +2,20 @@
 Consumer-facing API routes for product search and recommendations.
 Uses the LangGraph workflow for AI-powered product discovery.
 """
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from typing import List, Optional
 import logging
 import time
 
 from pydantic import BaseModel, Field
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from agents.workflow import get_workflow_orchestrator
 
 logger = logging.getLogger(__name__)
 
+limiter = Limiter(key_func=get_remote_address)
 router = APIRouter()
 
 # In-memory cache for recommendations (avoids repeated LLM calls on page load)
@@ -190,7 +193,8 @@ def workflow_product_to_response(product: dict, include_recommendation_fields: b
 # ============================================
 
 @router.post("/search", response_model=SearchResponse)
-async def search_products(request: SearchRequest):
+@limiter.limit("10/minute")
+async def search_products(request: Request, search_body: SearchRequest):
     """
     Search for products using AI-powered natural language processing.
 
@@ -206,13 +210,13 @@ async def search_products(request: SearchRequest):
     - "Samsung phone between $500 and $800"
     """
     try:
-        logger.info(f"Product search request: '{request.query}'")
+        logger.info(f"Product search request: '{search_body.query}'")
 
         # Get workflow orchestrator
         orchestrator = get_workflow_orchestrator()
 
         # Run consumer search workflow
-        result = await orchestrator.search_products(query=request.query)
+        result = await orchestrator.search_products(query=search_body.query)
 
         # Build metadata
         price_range = None
@@ -244,31 +248,37 @@ async def search_products(request: SearchRequest):
         ]
 
         return SearchResponse(
-            query=request.query,
+            query=search_body.query,
             metadata=metadata,
             recommendations=recommendations,
             allResults=all_results,
             totalResults=len(all_results),
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Search error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Search failed due to an internal error")
 
 
 @router.get("/search")
+@limiter.limit("10/minute")
 async def search_products_get(
+    request: Request,
     q: str = Query(..., min_length=1, max_length=500, description="Search query"),
 ):
     """
     GET version of search for simple queries.
     """
-    request = SearchRequest(query=q)
-    return await search_products(request)
+    search_body = SearchRequest(query=q)
+    return await search_products(request, search_body)
 
 
 @router.get("/recommendations")
+@limiter.limit("10/minute")
 async def get_trending_recommendations(
+    request: Request,
     category: Optional[str] = Query(None, description="Category filter"),
     limit: int = Query(10, ge=1, le=20, description="Number of recommendations"),
 ):
@@ -315,13 +325,17 @@ async def get_trending_recommendations(
 
         return recommendations
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Recommendations error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to get recommendations: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to get recommendations")
 
 
 @router.get("/compare")
+@limiter.limit("10/minute")
 async def compare_product_prices(
+    request: Request,
     query: str = Query(..., description="Product name to compare"),
 ):
     """
@@ -390,7 +404,7 @@ async def compare_product_prices(
         raise
     except Exception as e:
         logger.error(f"Comparison error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Comparison failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Comparison failed due to an internal error")
 
 
 @router.get("/categories")
@@ -420,7 +434,9 @@ async def health_check():
 # ============================================
 
 @router.get("/search/compare", response_model=SmartComparisonResponse)
+@limiter.limit("5/minute")
 async def smart_compare_products(
+    request: Request,
     query: str = Query(..., min_length=1, max_length=500, description="Product search query"),
     platforms: Optional[str] = Query(
         None,
@@ -528,9 +544,11 @@ async def smart_compare_products(
             totalPlatforms=len(comparisons),
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Smart comparison error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Comparison failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Comparison failed due to an internal error")
 
 
 @router.get("/platforms")
@@ -566,7 +584,9 @@ def _get_platform_categories(platform: str) -> List[str]:
 
 
 @router.get("/scrape/url")
+@limiter.limit("5/minute")
 async def scrape_single_url(
+    request: Request,
     url: str = Query(..., description="URL to scrape"),
     platform: Optional[str] = Query(None, description="Platform hint (auto-detected if not provided)"),
 ):
@@ -596,4 +616,4 @@ async def scrape_single_url(
         raise
     except Exception as e:
         logger.error(f"URL scrape error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Scraping failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Scraping failed due to an internal error")

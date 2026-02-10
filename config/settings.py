@@ -3,9 +3,7 @@ Configuration settings for the AI Product Curator application.
 Uses pydantic-settings to load from .env file automatically.
 """
 
-import os
 import logging
-from typing import List
 from pathlib import Path
 
 # Get the directory containing this file
@@ -20,11 +18,9 @@ load_dotenv(_ENV_FILE, override=True)
 
 _logger = logging.getLogger(__name__)
 _logger.info(f"Loaded .env from: {_ENV_FILE}")
-_logger.info(f"HUGGINGFACE_API_KEY in env: {bool(os.getenv('HUGGINGFACE_API_KEY'))}")
-_logger.info(f"HUGGINGFACE_MODEL in env: {os.getenv('HUGGINGFACE_MODEL', 'not set')}")
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, model_validator
 
 
 class Settings(BaseSettings):
@@ -48,13 +44,10 @@ class Settings(BaseSettings):
     DB_POOL_PRE_PING: bool = Field(default=True)
     DB_ECHO_POOL: bool = Field(default=False)
 
-    # HuggingFace API (Primary - OpenAI-compatible router)
-    HUGGINGFACE_API_KEY: str = Field(default="")
-    HUGGINGFACE_MODEL: str = Field(default="meta-llama/Llama-3.1-8B-Instruct:novita")
-
-    # Groq API (Fallback)
-    GROQ_API_KEY: str = Field(default="")
-    GROQ_MODEL: str = Field(default="llama-3.3-70b-versatile")
+    # LLM Configuration (OpenAI-compatible — works with HuggingFace, Groq, etc.)
+    LLM_API_KEY: str = Field(default="")
+    LLM_API_URL: str = Field(default="https://router.huggingface.co/v1/chat/completions")
+    LLM_MODEL: str = Field(default="meta-llama/Llama-3.1-8B-Instruct:novita")
 
     # Redis Configuration
     REDIS_URL: str = Field(default="redis://localhost:6379/0")
@@ -65,23 +58,21 @@ class Settings(BaseSettings):
 
     # API Configuration
     API_HOST: str = Field(default="0.0.0.0")
-    API_PORT: int = Field(default=8000)
+    API_PORT: int = Field(default=8001)
     API_RELOAD: bool = Field(default=True)
-
-    # CORS Origins
-    CORS_ORIGINS: List[str] = Field(
-        default=[
-            "http://localhost:3000",
-            "http://localhost:5173",
-            "http://127.0.0.1:3000",
-            "http://127.0.0.1:5173",
-        ]
-    )
 
     # Scraping Configuration
     SCRAPING_DELAY: int = Field(default=2)
     MAX_RETRIES: int = Field(default=3)
     REQUEST_TIMEOUT: int = Field(default=30)
+
+    # LLM Optimization
+    USE_LLM_QUERY_EXTRACTION: bool = Field(default=False)
+    USE_BATCH_RECOMMENDATIONS: bool = Field(default=True)
+
+    # LLM Rate Limiting
+    LLM_RATE_LIMIT: int = Field(default=20)
+    LLM_BURST_LIMIT: int = Field(default=5)
 
     # Application Settings
     ENVIRONMENT: str = Field(default="development")
@@ -89,10 +80,26 @@ class Settings(BaseSettings):
     DEBUG: bool = Field(default=True)
 
     # JWT Configuration
-    JWT_SECRET_KEY: str = Field(default="change-this-secret-key-in-production")
+    JWT_SECRET_KEY: str = Field(default="")
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(default=15)
     REFRESH_TOKEN_EXPIRE_DAYS: int = Field(default=7)
+
+    @model_validator(mode="after")
+    def validate_jwt_secret(self) -> "Settings":
+        if not self.JWT_SECRET_KEY:
+            if self.ENVIRONMENT == "production":
+                raise ValueError(
+                    "JWT_SECRET_KEY must be set via environment variable in production. "
+                    "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+                )
+            else:
+                _logger.warning(
+                    "JWT_SECRET_KEY not set — using an insecure default for development. "
+                    "Set JWT_SECRET_KEY in your .env file."
+                )
+                self.JWT_SECRET_KEY = "insecure-dev-only-key-do-not-use-in-production"
+        return self
 
     model_config = SettingsConfigDict(
         case_sensitive=True,
@@ -105,8 +112,4 @@ class Settings(BaseSettings):
 # Create global settings instance
 settings = Settings()
 
-# Debug: print loaded values on import
-_logger.info(f"Settings initialized:")
-_logger.info(f"  HUGGINGFACE_API_KEY loaded: {bool(settings.HUGGINGFACE_API_KEY)} (length: {len(settings.HUGGINGFACE_API_KEY) if settings.HUGGINGFACE_API_KEY else 0})")
-_logger.info(f"  HUGGINGFACE_MODEL: {settings.HUGGINGFACE_MODEL}")
-_logger.info(f"  GROQ_API_KEY loaded: {bool(settings.GROQ_API_KEY)}")
+_logger.info(f"Settings initialized: LLM_API_URL={settings.LLM_API_URL}, LLM_MODEL={settings.LLM_MODEL}")

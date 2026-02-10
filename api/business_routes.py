@@ -2,12 +2,15 @@
 Business Intelligence API routes for market analytics and insights.
 Handles market metrics, competitive analysis, trends, and AI-generated insights.
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta, date
 import logging
+
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from database.connection import get_db
 from database.models import (
@@ -19,6 +22,7 @@ from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
+limiter = Limiter(key_func=get_remote_address)
 router = APIRouter()
 
 
@@ -118,7 +122,9 @@ def calculate_percentage_change(current: float, previous: float) -> float:
 # ============================================
 
 @router.get("/dashboard-data", response_model=BusinessDashboardResponse)
+@limiter.limit("20/minute")
 async def get_dashboard_data(
+    request: Request,
     category: Optional[str] = Query(None, description="Category filter"),
     db: Session = Depends(get_db)
 ):
@@ -272,13 +278,17 @@ async def get_dashboard_data(
             sentiment=sentiment
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Dashboard data error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch dashboard data: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch dashboard data")
 
 
 @router.get("/insights", response_model=List[InsightResponse])
+@limiter.limit("20/minute")
 async def get_business_insights(
+    request: Request,
     category: Optional[str] = Query(None, description="Category filter"),
     limit: int = Query(10, ge=1, le=50, description="Number of insights"),
     db: Session = Depends(get_db)
@@ -313,13 +323,17 @@ async def get_business_insights(
             for insight in insights
         ]
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Insights error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch insights: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch insights")
 
 
 @router.get("/market-overview")
+@limiter.limit("20/minute")
 async def get_market_overview(
+    request: Request,
     category: Optional[str] = Query(None, description="Category filter"),
     db: Session = Depends(get_db)
 ):
@@ -356,13 +370,17 @@ async def get_market_overview(
             ]
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Market overview error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch market overview: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch market overview")
 
 
 @router.get("/price-trends/{category}")
+@limiter.limit("20/minute")
 async def get_price_trends(
+    request: Request,
     category: str,
     days: int = Query(30, ge=7, le=365, description="Number of days to analyze"),
     db: Session = Depends(get_db)
@@ -392,6 +410,8 @@ async def get_price_trends(
             "dataPoints": []  # Will be populated from price_history table
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Price trends error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to fetch price trends: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch price trends")

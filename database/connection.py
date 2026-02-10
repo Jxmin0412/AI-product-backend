@@ -16,7 +16,7 @@ from typing import Generator, AsyncGenerator, Optional, Dict, Any
 
 from sqlalchemy import create_engine, text, event
 from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.pool import QueuePool, NullPool
+from sqlalchemy.pool import QueuePool, NullPool, AsyncAdaptedQueuePool
 from sqlalchemy.exc import SQLAlchemyError, DisconnectionError, OperationalError
 
 # Async support
@@ -159,11 +159,18 @@ class DatabaseManager:
 
             pool_config = self._get_pool_config()
 
+            # Swap QueuePool for AsyncAdaptedQueuePool (QueuePool is not async-compatible)
+            async_pool_config = {
+                k: v for k, v in pool_config.items() if k != "pool_use_lifo"
+            }
+            if async_pool_config.get("poolclass") is QueuePool:
+                async_pool_config["poolclass"] = AsyncAdaptedQueuePool
+
             self._async_engine = create_async_engine(
                 async_url,
                 echo=settings.DEBUG and settings.ENVIRONMENT == "development",
                 future=True,
-                **{k: v for k, v in pool_config.items() if k != "pool_use_lifo"}
+                **async_pool_config
             )
 
             self._async_session_factory = async_sessionmaker(
