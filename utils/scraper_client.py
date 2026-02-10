@@ -20,14 +20,21 @@ logger = logging.getLogger(__name__)
 class BaseScraper(ABC):
     """Abstract base class for scrapers."""
 
-    # Common browser headers
+    # Modern Chrome browser headers to avoid bot detection
     HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
+        "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "none",
+        "sec-fetch-user": "?1",
     }
 
     @abstractmethod
@@ -349,30 +356,169 @@ class FlipkartScraper(BaseScraper):
         logger.info(f"Scraped {len(products)} products from Flipkart")
         return products
 
+    def _extract_from_initial_state(
+        self,
+        html: str,
+        category: Optional[str],
+        max_results: int
+    ) -> List[Dict[str, Any]]:
+        """Extract products from Flipkart's embedded window.__INITIAL_STATE__ JSON."""
+        products = []
+
+        try:
+            match = re.search(
+                r'window\.__INITIAL_STATE__\s*=\s*({.*?});\s*</script>',
+                html, re.DOTALL
+            )
+            if not match:
+                logger.debug("No __INITIAL_STATE__ found in Flipkart HTML")
+                return []
+
+            data = json.loads(match.group(1))
+            page_data = data.get("pageDataV4", {}).get("page", {}).get("data", {})
+
+            seen_pids = set()
+
+            for slot_key in page_data:
+                slot = page_data[slot_key]
+                if not isinstance(slot, list):
+                    continue
+
+                for item in slot:
+                    if not isinstance(item, dict):
+                        continue
+                    widget = item.get("widget", {})
+                    if widget.get("type") != "PRODUCT_SUMMARY":
+                        continue
+
+                    for prod in widget.get("data", {}).get("products", []):
+                        if len(products) >= max_results:
+                            break
+
+                        try:
+                            val = prod.get("productInfo", {}).get("value", {})
+                            action = prod.get("productInfo", {}).get("action", {})
+
+                            pid = val.get("id", "")
+                            if not pid or pid in seen_pids:
+                                continue
+                            seen_pids.add(pid)
+
+                            # Name
+                            name = val.get("titles", {}).get("title", "")
+                            if not name:
+                                continue
+
+                            # Price
+                            pricing = val.get("pricing", {})
+                            prices = pricing.get("prices", [])
+                            current_price = None
+                            original_price = None
+                            for p in prices:
+                                if p.get("strikeOff"):
+                                    original_price = p.get("value")
+                                else:
+                                    current_price = p.get("value")
+
+                            if current_price is None:
+                                continue
+
+                            # URL
+                            url = action.get("url", "") or val.get("baseUrl", "")
+                            full_url = f"{self.BASE_URL}{url}" if url.startswith("/") else url
+
+                            # Image
+                            image_url = None
+                            images = val.get("media", {}).get("images", [])
+                            if images:
+                                img_template = images[0].get("url", "")
+                                image_url = (
+                                    img_template
+                                    .replace("{@width}", "416")
+                                    .replace("{@height}", "416")
+                                    .replace("{@quality}", "70")
+                                )
+                                if image_url.startswith("http://"):
+                                    image_url = "https://" + image_url[7:]
+
+                            # Rating
+                            rating_data = val.get("rating", {})
+                            rating = rating_data.get("average") if isinstance(rating_data, dict) else None
+                            review_count = rating_data.get("reviewCount") if isinstance(rating_data, dict) else None
+
+                            # Category
+                            analytics = val.get("analyticsData", {})
+                            prod_category = category or analytics.get("category", "All")
+
+                            product = {
+                                "platform_product_id": pid,
+                                "name": name[:200],
+                                "url": full_url,
+                                "platform": "Flipkart",
+                                "category": prod_category,
+                                "currency": "INR",
+                                "price": float(current_price),
+                                "availability": "In Stock",
+                            }
+
+                            if original_price and original_price > current_price:
+                                product["original_price"] = float(original_price)
+                            if image_url:
+                                product["image_url"] = image_url
+                            if rating and rating > 0:
+                                product["rating"] = float(rating)
+                            if review_count:
+                                product["review_count"] = int(review_count)
+
+                            products.append(product)
+                            logger.debug(f"Extracted Flipkart product: {name[:50]} - ₹{current_price}")
+
+                        except Exception as e:
+                            logger.debug(f"Error parsing Flipkart product from JSON: {e}")
+                            continue
+
+                    if len(products) >= max_results:
+                        break
+                if len(products) >= max_results:
+                    break
+
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.debug(f"Failed to parse __INITIAL_STATE__ JSON: {e}")
+        except Exception as e:
+            logger.debug(f"__INITIAL_STATE__ extraction error: {e}")
+
+        return products
+
     def _extract_products_from_html(
         self,
         html: str,
         category: Optional[str],
         max_results: int
     ) -> List[Dict[str, Any]]:
-        """Extract products from HTML using BeautifulSoup."""
+        """Extract products from HTML — tries embedded JSON first, falls back to HTML parsing."""
+
+        # Try extracting from embedded JSON (most reliable)
+        products = self._extract_from_initial_state(html, category, max_results)
+        if products:
+            logger.info(f"Successfully extracted {len(products)} products from Flipkart via __INITIAL_STATE__ JSON")
+            return products
+
+        # Fallback: HTML parsing (works for some page layouts)
+        logger.info("Flipkart __INITIAL_STATE__ extraction returned 0 products, falling back to HTML parsing")
         products = []
 
         try:
             soup = BeautifulSoup(html, 'html.parser')
-
-            # Find all product links with /p/ pattern
             product_links = soup.find_all('a', href=re.compile(r'/[^/]+/p/'))
 
             logger.info(f"Found {len(product_links)} Flipkart product links")
 
             seen_pids = set()
 
-            for link in product_links[:max_results * 2]:  # Process more to filter out invalid ones
+            for link in product_links[:max_results * 2]:
                 try:
                     href = link.get('href', '')
 
-                    # Extract product ID
                     pid_match = re.search(r'/p/([a-zA-Z0-9]+)', href)
                     if not pid_match:
                         continue
@@ -401,7 +547,6 @@ class FlipkartScraper(BaseScraper):
                             break
 
                     # Extract product name
-                    # Flipkart uses various class names, try multiple approaches
                     name_elem = link.find('div', {'class': True})
                     if name_elem:
                         name_text = name_elem.get_text(strip=True)
@@ -413,7 +558,6 @@ class FlipkartScraper(BaseScraper):
                         if title:
                             product["name"] = title
 
-                    # If still no name, try finding any text element with reasonable length
                     if not product.get("name"):
                         for elem in link.find_all(['div', 'span']):
                             text = elem.get_text(strip=True)
@@ -422,7 +566,7 @@ class FlipkartScraper(BaseScraper):
                                 break
 
                     if not product.get("name"):
-                        continue  # Skip products without names
+                        continue
 
                     # Extract price from parent container
                     parent_text = parent.get_text() if parent else ""
@@ -440,7 +584,7 @@ class FlipkartScraper(BaseScraper):
                             pass
 
                     if "price" not in product:
-                        continue  # Skip products without price
+                        continue
 
                     # Extract image
                     img_elem = parent.find('img') if parent else link.find('img')
@@ -461,8 +605,6 @@ class FlipkartScraper(BaseScraper):
                     product["availability"] = "In Stock"
                     products.append(product)
 
-                    logger.debug(f"Extracted Flipkart product: {product.get('name', '')[:50]} - ₹{product.get('price')}")
-
                     if len(products) >= max_results:
                         break
 
@@ -473,11 +615,10 @@ class FlipkartScraper(BaseScraper):
         except Exception as e:
             logger.error(f"Flipkart extraction error: {e}")
 
-        # Log summary
         if products:
             logger.info(f"Successfully extracted {len(products)} products from Flipkart with prices")
         else:
-            logger.warning("Flipkart: Found product links but couldn't extract complete data (JS rendering required)")
+            logger.warning("Flipkart: Could not extract products from HTML or JSON")
 
         return products
 
