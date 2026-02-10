@@ -5,6 +5,7 @@ Uses the LangGraph workflow for AI-powered product discovery.
 from fastapi import APIRouter, HTTPException, Query, Request
 from typing import List, Optional
 import logging
+import time
 
 from pydantic import BaseModel, Field
 from slowapi import Limiter
@@ -16,6 +17,10 @@ logger = logging.getLogger(__name__)
 
 limiter = Limiter(key_func=get_remote_address)
 router = APIRouter()
+
+# In-memory cache for recommendations (avoids repeated LLM calls on page load)
+_recommendations_cache: dict = {}  # key -> {"data": ..., "timestamp": ...}
+RECOMMENDATIONS_CACHE_TTL = 600  # 10 minutes
 
 
 # ============================================
@@ -281,9 +286,21 @@ async def get_trending_recommendations(
     Get trending/popular product recommendations.
 
     Uses a general query to fetch popular products in a category.
+    Results are cached for 10 minutes to avoid exhausting LLM calls on page loads.
     """
     try:
-        logger.info(f"Trending recommendations: category={category}, limit={limit}")
+        cache_key = f"{category or 'all'}:{limit}"
+        now = time.time()
+
+        # Return cached data if fresh
+        if cache_key in _recommendations_cache:
+            entry = _recommendations_cache[cache_key]
+            age = now - entry["timestamp"]
+            if age < RECOMMENDATIONS_CACHE_TTL:
+                logger.info(f"Returning cached recommendations for '{cache_key}' (age: {int(age)}s)")
+                return entry["data"]
+
+        logger.info(f"Trending recommendations (cache miss): category={category}, limit={limit}")
 
         orchestrator = get_workflow_orchestrator()
 
@@ -299,6 +316,12 @@ async def get_trending_recommendations(
             workflow_product_to_response(p, include_recommendation_fields=True)
             for p in result.get("recommendations", [])[:limit]
         ]
+
+        # Cache the result
+        _recommendations_cache[cache_key] = {
+            "data": recommendations,
+            "timestamp": now,
+        }
 
         return recommendations
 
