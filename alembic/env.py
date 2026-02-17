@@ -27,7 +27,7 @@ from database.models import (
     MarketMetric, CompetitiveAnalysis, BusinessInsight,
     SearchTrend, CustomerJourney, ScrapingJob
 )
-from entities.user import User, RefreshToken, LoginSession
+from user_management.models import User, RefreshToken, LoginSession
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
