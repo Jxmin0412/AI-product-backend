@@ -116,14 +116,6 @@ class AuthService:
             return True
         return False
 
-    def revoke_all_user_tokens(self, user_id: str) -> int:
-        count = self.db.query(RefreshToken).filter(
-            RefreshToken.user_id == user_id,
-            RefreshToken.revoked == False
-        ).update({"revoked": True})
-        self.db.commit()
-        return count
-
     # Login Session Methods
     def create_login_session(self, user: User, ip_address: Optional[str] = None, user_agent: Optional[str] = None) -> LoginSession:
         session = LoginSession(

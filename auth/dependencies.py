@@ -41,19 +41,6 @@ async def get_current_user(
     return user
 
 
-async def get_current_user_optional(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
-    db: Session = Depends(get_db)
-) -> Optional[User]:
-    """Optional auth — returns None if not authenticated."""
-    if credentials is None:
-        return None
-    try:
-        return await get_current_user(credentials, db)
-    except HTTPException:
-        return None
-
-
 def get_refresh_token_from_cookie(request: Request) -> str:
     """Extract refresh token from httpOnly cookie."""
     token = request.cookies.get("refresh_token")

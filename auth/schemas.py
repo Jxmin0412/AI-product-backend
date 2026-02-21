@@ -21,12 +21,6 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class ChangePasswordRequest(BaseModel):
-    """Request body for password change."""
-    current_password: str
-    new_password: str = Field(..., min_length=8, max_length=128)
-
-
 # --- Responses ---
 
 class UserResponse(BaseModel):

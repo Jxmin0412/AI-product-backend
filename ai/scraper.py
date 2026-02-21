@@ -687,8 +687,3 @@ def get_product_scraper() -> ProductScraper:
     if _product_scraper is None:
         _product_scraper = ProductScraper()
     return _product_scraper
-
-
-# Backward-compatible aliases
-get_scraper_client = get_product_scraper
-get_smart_scraper = get_product_scraper

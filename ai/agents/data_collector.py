@@ -86,22 +86,3 @@ class DataCollectorAgent(BaseAgent):
     def _determine_platforms(self, state: AgentState) -> List[str]:
         """Determine which platforms to search based on context."""
         return self.DEFAULT_PLATFORMS
-
-    async def scrape_single_platform(
-        self, query: str, platform: str, **kwargs
-    ) -> List[Dict[str, Any]]:
-        """Scrape a specific platform directly."""
-        try:
-            return await self.scraper.search_single_platform(
-                query=query, platform=platform, **kwargs
-            )
-        except Exception as e:
-            logger.error(f"Error scraping {platform}: {e}")
-            return []
-
-    async def refresh_product_data(
-        self, product_url: str, platform: str
-    ) -> Optional[Dict[str, Any]]:
-        """Refresh data for a specific product by URL."""
-        logger.warning("Product refresh not yet implemented")
-        return None

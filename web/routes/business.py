@@ -30,29 +30,6 @@ router = APIRouter()
 
 
 # ============================================
-# HELPERS
-# ============================================
-
-def calculate_trend(current: float, previous: float) -> str:
-    """Calculate trend direction."""
-    if previous == 0:
-        return "stable"
-    change_pct = ((current - previous) / previous) * 100
-    if change_pct > 5:
-        return "up"
-    elif change_pct < -5:
-        return "down"
-    return "stable"
-
-
-def calculate_percentage_change(current: float, previous: float) -> float:
-    """Calculate percentage change."""
-    if previous == 0:
-        return 0.0
-    return round(((current - previous) / previous) * 100, 2)
-
-
-# ============================================
 # API ENDPOINTS (sync handlers — FastAPI auto-threadpools)
 # ============================================
 

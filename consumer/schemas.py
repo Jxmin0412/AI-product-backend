@@ -113,13 +113,3 @@ class SmartComparisonResponse(BaseModel):
     images: List[str] = []
     recommendation: str
     totalPlatforms: int
-
-
-class ProductImageResponse(BaseModel):
-    """Product image response."""
-    id: Optional[str] = None
-    imageUrl: str
-    imageType: str = "primary"
-    altText: Optional[str] = None
-    sourcePlatform: Optional[str] = None
-    displayOrder: int = 0
