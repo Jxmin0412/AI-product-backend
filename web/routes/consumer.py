@@ -135,7 +135,8 @@ async def search_products(
 
         # Save search record with user_id and actual results
         try:
-            # Store top recommendations as JSON for cross-user recommendations
+            # Store all ranked products as JSON for cross-user recommendations
+            all_ranked = result.get("ranked_products") or result.get("recommendations") or []
             results_json = [
                 {
                     "name": p.get("name"),
@@ -157,7 +158,7 @@ async def search_products(
                     "reason": p.get("reason"),
                     "match_type": p.get("match_type"),
                 }
-                for p in result.get("recommendations", [])[:10]
+                for p in all_ranked[:20]
             ] or None
 
             search_record = UserSearch(
@@ -288,12 +289,25 @@ async def get_for_you_recommendations(
             .all()
         )
 
-        if saved_searches:
-            # 2. Collect products, deduplicate by name
-            seen_names = set()
-            collected_products = []
+        # Related categories to supplement results
+        RELATED_CATEGORIES = {
+            "Audio": ["Electronics", "Smartphones"],
+            "Smartphones": ["Electronics", "Audio"],
+            "Electronics": ["Smartphones", "Audio", "Laptops"],
+            "Laptops": ["Electronics", "Smartphones"],
+            "Home": ["Electronics", "Fashion"],
+            "Fashion": ["Home", "Electronics"],
+        }
 
+        # 2. Collect products from saved searches, deduplicate by name
+        seen_names = set()
+        collected_products = []
+        searched_categories = set()
+
+        if saved_searches:
             for search in saved_searches:
+                if search.extracted_category:
+                    searched_categories.add(search.extracted_category)
                 if not search.results_data:
                     continue
                 for product in search.results_data:
@@ -302,39 +316,81 @@ async def get_for_you_recommendations(
                         seen_names.add(name_key)
                         collected_products.append(product)
 
-            if collected_products:
-                # 3. Sort by recommendation_score, take top N
-                collected_products.sort(
-                    key=lambda p: p.get("recommendation_score") or 0,
-                    reverse=True,
-                )
-                top_products = collected_products[:limit]
+        # 3. If not enough saved products, supplement with related categories
+        if len(collected_products) < limit:
+            related_cats = set()
+            for cat in searched_categories:
+                for rc in RELATED_CATEGORIES.get(cat, []):
+                    related_cats.add(rc)
+            # Also add general categories if still sparse
+            if not related_cats:
+                related_cats = {"Electronics", "Smartphones", "Audio"}
 
-                # 4. Convert to API response format
-                recommendations = [
-                    workflow_product_to_response(p, include_recommendation_fields=True)
-                    for p in top_products
-                ]
+            for rel_cat in related_cats:
+                if len(collected_products) >= limit:
+                    break
+                try:
+                    extra = await get_trending_recommendations(category=rel_cat, limit=10)
+                    for p in extra:
+                        # extra items are ProductResponse objects, convert to dict
+                        p_dict = p.model_dump() if hasattr(p, "model_dump") else p.__dict__ if hasattr(p, "__dict__") else p
+                        name_key = (p_dict.get("name") or "").lower().strip()
+                        if name_key and name_key not in seen_names:
+                            seen_names.add(name_key)
+                            # Map ProductResponse field names back to workflow dict keys
+                            collected_products.append({
+                                "name": p_dict.get("name"),
+                                "price": p_dict.get("price"),
+                                "original_price": p_dict.get("originalPrice") or p_dict.get("original_price"),
+                                "discount_percent": p_dict.get("discountPercent") or p_dict.get("discount_percent"),
+                                "platform": p_dict.get("platform"),
+                                "platform_product_id": p_dict.get("platformProductId") or p_dict.get("platform_product_id"),
+                                "rating": p_dict.get("rating"),
+                                "review_count": p_dict.get("reviews") or p_dict.get("review_count"),
+                                "image_url": p_dict.get("image") or p_dict.get("image_url"),
+                                "url": p_dict.get("url"),
+                                "availability": p_dict.get("availability"),
+                                "brand": p_dict.get("brand"),
+                                "category": p_dict.get("category"),
+                                "features": p_dict.get("features", []),
+                                "description": p_dict.get("description"),
+                                "recommendation_score": p_dict.get("recommendation_score") or 50,
+                                "reason": p_dict.get("reason"),
+                                "match_type": p_dict.get("matchType") or p_dict.get("match_type"),
+                            })
+                except Exception as e:
+                    logger.warning(f"Failed to fetch related products for {rel_cat}: {e}")
 
-                # Determine the dominant category for the label
-                categories = [s.extracted_category for s in saved_searches if s.extracted_category]
-                top_category = max(set(categories), key=categories.count) if categories else None
+        if collected_products:
+            # 4. Sort by recommendation_score, take top N
+            collected_products.sort(
+                key=lambda p: p.get("recommendation_score") or 0,
+                reverse=True,
+            )
+            top_products = collected_products[:limit]
 
-                has_other_users = any(s.user_id != current_user.id for s in saved_searches)
-                if has_other_users:
-                    label = f"Based on what others are searching in {top_category}" if top_category else "Based on what others are searching"
-                    source = "other_users"
-                else:
-                    label = "Based on your recent searches"
-                    source = "trending"
+            recommendations = [
+                workflow_product_to_response(p, include_recommendation_fields=True)
+                for p in top_products
+            ]
 
-                logger.info(f"For-you: serving {len(recommendations)} saved products (include_own={include_own})")
-                return ForYouResponse(
-                    source=source,
-                    category=top_category,
-                    label=label,
-                    recommendations=recommendations,
-                )
+            top_category = max(searched_categories, key=lambda c: 1) if searched_categories else None
+            has_other_users = saved_searches and any(s.user_id != current_user.id for s in saved_searches)
+
+            if has_other_users:
+                label = f"Based on what others are searching in {top_category}" if top_category else "Based on what others are searching"
+                source = "other_users"
+            else:
+                label = "Recommended for you"
+                source = "trending"
+
+            logger.info(f"For-you: serving {len(recommendations)} products (saved + related, include_own={include_own})")
+            return ForYouResponse(
+                source=source,
+                category=top_category,
+                label=label,
+                recommendations=recommendations,
+            )
 
         # 5. Fallback: return general trending (runs live pipeline)
         logger.info("For-you: no saved results, returning general trending")
