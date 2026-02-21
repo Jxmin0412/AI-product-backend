@@ -105,38 +105,47 @@ class ConsumerRecommenderAgent(BaseAgent):
         product: Dict[str, Any],
         state: AgentState
     ) -> Tuple[float, Dict[str, float]]:
-        """Calculate recommendation score for a product."""
+        """Calculate recommendation score for a product (0-100 scale)."""
         breakdown = {}
 
-        # 1. Rating score
-        rating = product.get("rating") or 3.0
-        breakdown["rating"] = (rating / 5) * self.WEIGHTS["rating"] * 4
+        # 1. Rating score (0-25): higher rating = higher score
+        rating = product.get("rating") or 0
+        breakdown["rating"] = (rating / 5.0) * self.WEIGHTS["rating"]
 
-        # 2. Review count score (logarithmic)
+        # 2. Review count score (0-10): logarithmic, rewards social proof
         reviews = product.get("review_count") or 0
         if reviews > 0:
-            review_score = min(math.log10(reviews + 1) / 4, 1.0)
+            # log10(10000) = 4, so 10K+ reviews = max score
+            review_score = min(math.log10(reviews + 1) / 4.0, 1.0)
             breakdown["reviews"] = review_score * self.WEIGHTS["reviews"]
         else:
             breakdown["reviews"] = 0
 
-        # 3. Price value score
+        # 3. Price value score (0-15): within budget = rewarded
         price = product.get("price") or 0
         if price > 0:
-            max_price = state.extracted_price_range[1] if state.extracted_price_range else None
+            max_price = None
+            if state.extracted_price_range and state.extracted_price_range[1]:
+                max_price = state.extracted_price_range[1]
             if max_price and price <= max_price:
+                # Closer to max = less score (saving money is better)
                 price_ratio = price / max_price
                 breakdown["price_value"] = (1 - price_ratio * 0.5) * self.WEIGHTS["price_value"]
+            elif max_price and price > max_price:
+                # Over budget penalty
+                over_ratio = min((price - max_price) / max_price, 1.0)
+                breakdown["price_value"] = self.WEIGHTS["price_value"] * max(0.1, 0.5 - over_ratio * 0.4)
             else:
-                breakdown["price_value"] = self.WEIGHTS["price_value"] * 0.5
+                # No budget specified — give moderate score
+                breakdown["price_value"] = self.WEIGHTS["price_value"] * 0.6
         else:
             breakdown["price_value"] = 0
 
-        # 4. Discount bonus
+        # 4. Discount bonus (0-5): bigger discount = better deal
         discount = product.get("discount_percent") or 0
-        breakdown["discount"] = min(discount / 50, 1.0) * self.WEIGHTS["discount"]
+        breakdown["discount"] = min(discount / 50.0, 1.0) * self.WEIGHTS["discount"]
 
-        # 5. Availability score
+        # 5. Availability score (0-20): in stock strongly preferred
         availability = product.get("availability", "Unknown")
         if availability == "In Stock":
             breakdown["availability"] = self.WEIGHTS["availability"]
@@ -147,35 +156,75 @@ class ConsumerRecommenderAgent(BaseAgent):
         else:
             breakdown["availability"] = self.WEIGHTS["availability"] * 0.5
 
-        # 6. Feature match score
-        feature_score = self._calculate_feature_match(product, state)
-        breakdown["feature_match"] = feature_score * self.WEIGHTS["feature_match"]
+        # 6. Relevance score (0-25): how well product matches the query/category
+        relevance_score = self._calculate_relevance(product, state)
+        breakdown["feature_match"] = relevance_score * self.WEIGHTS["feature_match"]
 
         total = sum(breakdown.values())
         return total, breakdown
 
-    def _calculate_feature_match(self, product: Dict[str, Any], state: AgentState) -> float:
-        """Calculate how well product features match user's requirements."""
-        if not state.extracted_features:
-            return 0.5
+    def _calculate_relevance(self, product: Dict[str, Any], state: AgentState) -> float:
+        """Calculate how relevant a product is to the user's query and category."""
+        score = 0.0
+        checks = 0
 
-        user_features = [f.lower() for f in state.extracted_features]
-        product_features = [f.lower() for f in product.get("features", [])]
-        product_name = product.get("name", "").lower()
-        product_desc = product.get("description", "").lower()
+        # Check feature match if user specified features
+        if state.extracted_features:
+            user_features = [f.lower() for f in state.extracted_features]
+            product_features = [f.lower() for f in product.get("features", [])]
+            product_name = product.get("name", "").lower()
+            product_desc = product.get("description", "").lower()
 
-        matches = 0
-        for feature in user_features:
-            if any(feature in pf for pf in product_features):
-                matches += 1
-            elif feature in product_name:
-                matches += 0.8
-            elif feature in product_desc:
-                matches += 0.5
+            matches = 0
+            for feature in user_features:
+                if any(feature in pf for pf in product_features):
+                    matches += 1
+                elif feature in product_name:
+                    matches += 0.8
+                elif feature in product_desc:
+                    matches += 0.5
+            score += min(matches / len(user_features), 1.0)
+            checks += 1
 
-        if user_features:
-            return min(matches / len(user_features), 1.0)
-        return 0.5
+        # Check category match
+        if state.extracted_category and state.extracted_category != "All":
+            product_category = (product.get("category") or "").lower()
+            target_category = state.extracted_category.lower()
+            product_name = product.get("name", "").lower()
+
+            if target_category in product_category or product_category in target_category:
+                score += 1.0
+            elif target_category in product_name:
+                score += 0.7
+            else:
+                score += 0.2
+            checks += 1
+
+        # Check product name relevance to the search query
+        if state.extracted_product_name:
+            query_words = set(state.extracted_product_name.lower().split())
+            name_words = set(product.get("name", "").lower().split())
+            if query_words and name_words:
+                overlap = len(query_words & name_words) / len(query_words)
+                score += min(overlap, 1.0)
+                checks += 1
+
+        # Check brand match
+        if state.extracted_brand:
+            product_brand = (product.get("brand") or "").lower()
+            product_name = product.get("name", "").lower()
+            if state.extracted_brand.lower() in product_brand or state.extracted_brand.lower() in product_name:
+                score += 1.0
+            else:
+                score += 0.3
+            checks += 1
+
+        if checks > 0:
+            return score / checks
+        # No specific criteria — use product quality signals as proxy
+        rating = product.get("rating") or 0
+        reviews = product.get("review_count") or 0
+        return min(0.3 + (rating / 5.0) * 0.4 + min(reviews / 1000.0, 1.0) * 0.3, 1.0)
 
     async def _create_recommendation(
         self,
@@ -202,18 +251,21 @@ class ConsumerRecommenderAgent(BaseAgent):
         """Generate recommendation reason using LLM."""
         try:
             preferences = []
-            if state.extracted_price_range[1]:
-                preferences.append(f"Budget: under ${state.extracted_price_range[1]}")
+            if state.extracted_price_range and state.extracted_price_range[1]:
+                preferences.append(f"Budget: under ₹{state.extracted_price_range[1]:,.0f}")
             if state.extracted_brand:
                 preferences.append(f"Brand preference: {state.extracted_brand}")
             if state.extracted_features:
                 preferences.append(f"Features wanted: {', '.join(state.extracted_features)}")
 
+            currency = product.get("currency", "INR")
+            price_display = f"₹{product.get('price', 0):,.0f}" if currency == "INR" else f"${product.get('price', 0)}"
+
             prompt = RECOMMENDATION_REASON_PROMPT.format(
                 query=state.user_query,
                 preferences="; ".join(preferences) if preferences else "None specified",
                 product_name=product.get("name", "Unknown"),
-                price=product.get("price", 0),
+                price=price_display,
                 rating=product.get("rating", "N/A"),
                 reviews=product.get("review_count", 0),
                 features=", ".join(product.get("features", [])) or "Not specified"
@@ -267,15 +319,16 @@ class ConsumerRecommenderAgent(BaseAgent):
 
     def _determine_match_type(self, product: Dict[str, Any], state: AgentState) -> str:
         """Determine the type of match for categorization."""
-        score_breakdown = product.get("score_breakdown", {})
+        breakdown = product.get("score_breakdown", {})
 
-        if score_breakdown.get("feature_match", 0) > self.WEIGHTS["feature_match"] * 0.7:
+        # Each score is 0 to WEIGHT. Check if it's above 70% of its max.
+        if breakdown.get("feature_match", 0) > self.WEIGHTS["feature_match"] * 0.7:
             return "feature_match"
-        elif score_breakdown.get("price_value", 0) > self.WEIGHTS["price_value"] * 0.8:
+        elif breakdown.get("price_value", 0) > self.WEIGHTS["price_value"] * 0.8:
             return "best_value"
-        elif score_breakdown.get("rating", 0) > self.WEIGHTS["rating"] * 3.5:
+        elif breakdown.get("rating", 0) > self.WEIGHTS["rating"] * 0.85:
             return "top_rated"
-        elif score_breakdown.get("discount", 0) > self.WEIGHTS["discount"] * 0.5:
+        elif breakdown.get("discount", 0) > self.WEIGHTS["discount"] * 0.6:
             return "best_deal"
         else:
             return "recommended"

@@ -4,14 +4,21 @@ Uses the LangGraph workflow for AI-powered product discovery.
 """
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func as sa_func
+from sqlalchemy.orm import Session
 
 from ai.workflow import get_workflow_orchestrator
 from ai.scraper import get_product_scraper, PLATFORM_CONFIGS
+from auth.dependencies import get_current_user, get_current_user_optional
+from database.connection import get_db
+from database.models import UserSearch
 from consumer.schemas import (
     ProductResponse, SearchRequest, SearchMetadata, SearchResponse,
+    ForYouResponse,
     PlatformPrice, PriceComparisonResponse,
     PlatformComparison, PriceRange, SmartComparisonResponse,
 )
@@ -84,7 +91,11 @@ def workflow_product_to_response(product: dict, include_recommendation_fields: b
 # ============================================
 
 @router.post("/search", response_model=SearchResponse)
-async def search_products(request: SearchRequest):
+async def search_products(
+    request: SearchRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user_optional),
+):
     """
     Search for products using AI-powered natural language processing.
 
@@ -122,6 +133,48 @@ async def search_products(request: SearchRequest):
             for p in result.get("ranked_products", [])
         ]
 
+        # Save search record with user_id and actual results
+        try:
+            # Store top recommendations as JSON for cross-user recommendations
+            results_json = [
+                {
+                    "name": p.get("name"),
+                    "price": p.get("price"),
+                    "original_price": p.get("original_price"),
+                    "discount_percent": p.get("discount_percent"),
+                    "platform": p.get("platform"),
+                    "platform_product_id": p.get("platform_product_id"),
+                    "rating": p.get("rating"),
+                    "review_count": p.get("review_count"),
+                    "image_url": p.get("image_url"),
+                    "url": p.get("url"),
+                    "availability": p.get("availability"),
+                    "brand": p.get("brand"),
+                    "category": p.get("category"),
+                    "features": p.get("features", []),
+                    "description": p.get("description"),
+                    "recommendation_score": p.get("recommendation_score"),
+                    "reason": p.get("reason"),
+                    "match_type": p.get("match_type"),
+                }
+                for p in result.get("recommendations", [])[:10]
+            ] or None
+
+            search_record = UserSearch(
+                user_id=current_user.id if current_user else None,
+                query_text=request.query,
+                extracted_product_name=result.get("extracted_product_name"),
+                extracted_category=result.get("extracted_category"),
+                results_count=len(all_results),
+                results_data=results_json,
+                session_id=result.get("session_id"),
+            )
+            db.add(search_record)
+            db.commit()
+        except Exception as save_err:
+            logger.warning(f"Failed to save search record: {save_err}")
+            db.rollback()
+
         return SearchResponse(
             query=request.query,
             metadata=metadata,
@@ -138,16 +191,18 @@ async def search_products(request: SearchRequest):
 @router.get("/search")
 async def search_products_get(
     q: str = Query(..., min_length=1, max_length=500, description="Search query"),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user_optional),
 ):
     """GET version of search for simple queries."""
     request = SearchRequest(query=q)
-    return await search_products(request)
+    return await search_products(request, db=db, current_user=current_user)
 
 
 @router.get("/recommendations")
 async def get_trending_recommendations(
     category: Optional[str] = Query(None, description="Category filter"),
-    limit: int = Query(10, ge=1, le=20, description="Number of recommendations"),
+    limit: int = Query(10, ge=1, le=50, description="Number of recommendations"),
 ):
     """
     Get trending/popular product recommendations.
@@ -165,10 +220,19 @@ async def get_trending_recommendations(
 
         orchestrator = get_workflow_orchestrator()
 
+        # Build specific queries per category for better relevance
+        category_queries = {
+            "Laptops": "top rated laptops 2025",
+            "Audio": "best wireless headphones earbuds speakers",
+            "Smartphones": "best smartphones mobiles 2025",
+            "Electronics": "top electronics gadgets TV smartwatch",
+            "Home": "best home appliances kitchen essentials",
+            "Fashion": "trending fashion clothing accessories",
+        }
         if category and category != "All":
-            query = f"best {category.lower()} products"
+            query = category_queries.get(category, f"best {category.lower()} products")
         else:
-            query = "popular tech products"
+            query = "top rated trending products electronics gadgets"
 
         result = await orchestrator.search_products(query=query)
 
@@ -183,6 +247,107 @@ async def get_trending_recommendations(
 
     except Exception as e:
         logger.error(f"Recommendations error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get recommendations: {str(e)}")
+
+
+@router.get("/recommendations/for-you", response_model=ForYouResponse)
+async def get_for_you_recommendations(
+    limit: int = Query(10, ge=1, le=50, description="Number of recommendations"),
+    include_own: bool = Query(False, description="Include current user's own search results"),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Get personalized recommendations based on what users have been searching.
+    Pulls actual saved search results from the DB — no re-scraping needed.
+    Requires authentication.
+
+    - include_own=false (default): only other users' results ("For You")
+    - include_own=true: all users' results including own ("All" tab)
+    """
+    try:
+        thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
+
+        # 1. Query saved searches with results
+        search_query = (
+            db.query(UserSearch)
+            .filter(
+                UserSearch.user_id.isnot(None),
+                UserSearch.results_data.isnot(None),
+                UserSearch.searched_at >= thirty_days_ago,
+            )
+        )
+
+        if not include_own:
+            search_query = search_query.filter(UserSearch.user_id != current_user.id)
+
+        saved_searches = (
+            search_query
+            .order_by(UserSearch.searched_at.desc())
+            .limit(50)
+            .all()
+        )
+
+        if saved_searches:
+            # 2. Collect products, deduplicate by name
+            seen_names = set()
+            collected_products = []
+
+            for search in saved_searches:
+                if not search.results_data:
+                    continue
+                for product in search.results_data:
+                    name_key = (product.get("name") or "").lower().strip()
+                    if name_key and name_key not in seen_names:
+                        seen_names.add(name_key)
+                        collected_products.append(product)
+
+            if collected_products:
+                # 3. Sort by recommendation_score, take top N
+                collected_products.sort(
+                    key=lambda p: p.get("recommendation_score") or 0,
+                    reverse=True,
+                )
+                top_products = collected_products[:limit]
+
+                # 4. Convert to API response format
+                recommendations = [
+                    workflow_product_to_response(p, include_recommendation_fields=True)
+                    for p in top_products
+                ]
+
+                # Determine the dominant category for the label
+                categories = [s.extracted_category for s in saved_searches if s.extracted_category]
+                top_category = max(set(categories), key=categories.count) if categories else None
+
+                has_other_users = any(s.user_id != current_user.id for s in saved_searches)
+                if has_other_users:
+                    label = f"Based on what others are searching in {top_category}" if top_category else "Based on what others are searching"
+                    source = "other_users"
+                else:
+                    label = "Based on your recent searches"
+                    source = "trending"
+
+                logger.info(f"For-you: serving {len(recommendations)} saved products (include_own={include_own})")
+                return ForYouResponse(
+                    source=source,
+                    category=top_category,
+                    label=label,
+                    recommendations=recommendations,
+                )
+
+        # 5. Fallback: return general trending (runs live pipeline)
+        logger.info("For-you: no saved results, returning general trending")
+        recommendations = await get_trending_recommendations(category=None, limit=limit)
+        return ForYouResponse(
+            source="trending",
+            category=None,
+            label="Trending products",
+            recommendations=recommendations,
+        )
+
+    except Exception as e:
+        logger.error(f"For-you recommendations error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get recommendations: {str(e)}")
 
 

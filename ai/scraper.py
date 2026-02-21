@@ -85,32 +85,53 @@ PLATFORM_CONFIGS: Dict[str, PlatformConfig] = {
     ),
 }
 
-_BROWSER_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-    "sec-fetch-dest": "document",
-    "sec-fetch-mode": "navigate",
-    "sec-fetch-site": "none",
-    "sec-fetch-user": "?1",
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
+]
+
+_PLATFORM_REFERERS = {
+    "amazon": "https://www.amazon.in/",
+    "flipkart": "https://www.flipkart.com/",
+    "myntra": "https://www.myntra.com/",
+    "croma": "https://www.croma.com/",
 }
+
+def _get_browser_headers(platform: str = None) -> dict:
+    """Get browser-like headers with rotated User-Agent and platform referer."""
+    ua = random.choice(_USER_AGENTS)
+    headers = {
+        "User-Agent": ua,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-IN,en-GB;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "same-origin" if platform else "none",
+        "sec-fetch-user": "?1",
+    }
+    if platform and platform in _PLATFORM_REFERERS:
+        headers["Referer"] = _PLATFORM_REFERERS[platform]
+    return headers
 
 
 # ============================================
 # SHARED HELPERS
 # ============================================
 
-async def fetch_page(url: str, timeout: int = 30) -> Optional[str]:
-    """Fetch page HTML with browser-like headers."""
+async def fetch_page(url: str, timeout: int = 30, platform: str = None) -> Optional[str]:
+    """Fetch page HTML with browser-like headers and platform-specific referer."""
+    headers = _get_browser_headers(platform)
     try:
         async with httpx.AsyncClient(
-            headers=_BROWSER_HEADERS, timeout=timeout, follow_redirects=True
+            headers=headers, timeout=timeout, follow_redirects=True
         ) as client:
             response = await client.get(url)
             response.raise_for_status()
@@ -152,6 +173,8 @@ class ProductScraper:
     # Multi-platform search (used by DataCollectorAgent)
     # ------------------------------------------
 
+    MIN_RESULTS = 6
+
     async def search_products(
         self,
         query: str,
@@ -171,12 +194,55 @@ class ProductScraper:
 
         results_per_platform = max(max_results // len(valid_platforms), 5)
 
+        all_products = await self._scrape_platforms(
+            query=query, platforms=valid_platforms,
+            category=category, results_per_platform=results_per_platform,
+        )
+
+        # Retry with simplified query if too few results
+        if len(all_products) < self.MIN_RESULTS:
+            simple_query = self._simplify_query(query)
+            if simple_query != query:
+                logger.info(f"Too few results ({len(all_products)}), retrying with simplified query: '{simple_query}'")
+                retry_products = await self._scrape_platforms(
+                    query=simple_query, platforms=valid_platforms,
+                    category=category, results_per_platform=results_per_platform,
+                )
+                # Merge without duplicating (by name)
+                existing_names = {p.get("name", "").lower() for p in all_products}
+                for p in retry_products:
+                    if p.get("name", "").lower() not in existing_names:
+                        all_products.append(p)
+                        existing_names.add(p.get("name", "").lower())
+
+        # Post-filter by price range
+        if min_price is not None or max_price is not None:
+            filtered = [
+                p for p in all_products
+                if (min_price is None or (p.get("price") or 0) >= min_price)
+                and (max_price is None or (p.get("price") or 0) <= max_price)
+            ]
+            # Only apply filter if it doesn't eliminate everything
+            if filtered:
+                all_products = filtered
+
+        if not all_products:
+            logger.warning("No products scraped — returning demo data")
+            all_products = _get_demo_products(query, category)
+
+        return all_products[:max_results]
+
+    async def _scrape_platforms(
+        self, query: str, platforms: List[str],
+        category: Optional[str], results_per_platform: int,
+    ) -> List[Dict[str, Any]]:
+        """Scrape multiple platforms concurrently and combine results."""
         tasks = [
             self._search_single_platform(
                 query=query, platform=p,
                 category=category, max_results=results_per_platform,
             )
-            for p in valid_platforms
+            for p in platforms
         ]
 
         all_products = []
@@ -184,21 +250,19 @@ class ProductScraper:
             if isinstance(result, list):
                 all_products.extend(result)
             elif isinstance(result, Exception):
-                logger.error(f"Scraping error for {valid_platforms[i]}: {result}")
+                logger.error(f"Scraping error for {platforms[i]}: {result}")
 
-        # Post-filter by price range
-        if min_price is not None or max_price is not None:
-            all_products = [
-                p for p in all_products
-                if (min_price is None or (p.get("price") or 0) >= min_price)
-                and (max_price is None or (p.get("price") or 0) <= max_price)
-            ]
+        return all_products
 
-        if not all_products:
-            logger.warning("No products scraped — returning demo data")
-            all_products = _get_demo_products(query, category)
-
-        return all_products[:max_results]
+    def _simplify_query(self, query: str) -> str:
+        """Simplify a search query for broader results (strip modifiers, keep core terms)."""
+        simplified = re.sub(
+            r'\b(?:best|top|good|great|cheap|affordable|premium|professional|under|below|above|over|around|latest|new|2024|2025|2026)\b',
+            '', query, flags=re.IGNORECASE
+        )
+        simplified = re.sub(r'\$?\d[\d,]*(?:\.\d+)?', '', simplified)
+        simplified = ' '.join(simplified.split()).strip()
+        return simplified if len(simplified) >= 3 else query
 
     async def search_single_platform(self, query: str, platform: str, **kwargs) -> List[Dict[str, Any]]:
         """Search a single platform. Public wrapper."""
@@ -294,7 +358,7 @@ class ProductScraper:
 
         search_url = config.search_url_template.format(query=quote_plus(query))
 
-        html = await fetch_page(search_url)
+        html = await fetch_page(search_url, platform=platform)
         if not html or len(html) < 1000:
             logger.warning(f"{config.name}: empty or blocked response")
             return []
@@ -303,26 +367,46 @@ class ProductScraper:
             logger.warning(f"{config.name}: CAPTCHA/bot detection triggered")
             return []
 
-        # Pre-filter HTML to product sections, then convert to markdown
-        focused_html = self._extract_product_html(html)
-        source_html = focused_html or html
+        # Strategy 1: Per-card extraction (associates images/URLs correctly)
+        cards = self._extract_product_cards(html, platform, config.base_url)
 
-        # Extract image URLs and product links from HTML (html2text drops both)
-        image_urls = self._extract_image_urls(source_html)
-        product_links = self._extract_product_links(source_html, platform, config.base_url)
+        if cards:
+            logger.info(f"{config.name}: extracted {len(cards)} product cards")
+            sections = []
+            for i, card in enumerate(cards[:max_results]):
+                section = f"=== PRODUCT {i+1} ==="
+                if card.get("product_url"):
+                    section += f"\nProduct URL: {card['product_url']}"
+                if card.get("image_url"):
+                    section += f"\nProduct Image URL: {card['image_url']}"
+                card_md = self._html_to_markdown(card["html"])
+                # Limit each card to keep total size manageable
+                if len(card_md) > 1500:
+                    card_md = card_md[:1500]
+                section += f"\n{card_md}"
+                sections.append(section)
+            markdown = "\n\n".join(sections)
+        else:
+            # Strategy 2: Whole-page fallback with global image/link extraction
+            logger.info(f"{config.name}: no card patterns found, using whole-page extraction")
+            focused_html = self._extract_product_html(html)
+            source_html = focused_html or html
 
-        markdown = self._html_to_markdown(source_html)
-        # Keep under ~12K chars (~3K tokens) to stay within Groq free-tier TPM limits
-        if len(markdown) > 12000:
-            markdown = markdown[:12000] + "\n...[truncated]"
+            image_urls = self._extract_image_urls(source_html)
+            product_links = self._extract_product_links(source_html, platform, config.base_url)
 
-        # Append extracted data so the LLM can match them to products by position
-        if image_urls or product_links:
-            markdown += "\n\nEXTRACTED DATA (match to products above by order):"
-            if product_links:
-                markdown += "\nProduct URLs:\n" + "\n".join(f"{i+1}. {url}" for i, url in enumerate(product_links[:max_results]))
-            if image_urls:
-                markdown += "\nProduct Images:\n" + "\n".join(f"{i+1}. {url}" for i, url in enumerate(image_urls[:max_results]))
+            markdown = self._html_to_markdown(source_html)
+
+            if image_urls or product_links:
+                markdown += "\n\nEXTRACTED DATA (match to products above by order):"
+                if product_links:
+                    markdown += "\nProduct URLs:\n" + "\n".join(f"{i+1}. {url}" for i, url in enumerate(product_links[:max_results]))
+                if image_urls:
+                    markdown += "\nProduct Images:\n" + "\n".join(f"{i+1}. {url}" for i, url in enumerate(image_urls[:max_results]))
+
+        # Truncation — increased budget for better extraction
+        if len(markdown) > 24000:
+            markdown = markdown[:24000] + "\n...[truncated]"
 
         try:
             prompt = SEARCH_RESULTS_EXTRACTION_PROMPT.format(
@@ -611,6 +695,85 @@ class ProductScraper:
                     links.append(base_url + path)
         return links
 
+    def _extract_product_cards(self, html: str, platform: str, base_url: str) -> List[Dict[str, Any]]:
+        """Extract individual product cards, each with its own image URL and product link.
+        Returns list of {"html": str, "image_url": str|None, "product_url": str|None}."""
+        # Promote lazy-loaded images before extraction
+        html = re.sub(r'data-src="(https?://[^"]+)"', r'src="\1"', html)
+
+        cards = []
+        card_starts = []
+
+        if platform == "amazon":
+            card_starts = [m.start() for m in re.finditer(
+                r'<div[^>]*data-component-type="s-search-result"', html
+            )]
+            tag = 'div'
+        elif platform == "flipkart":
+            card_starts = [m.start() for m in re.finditer(
+                r'<a[^>]*href="[^"]*/p/[^"]*"', html
+            )]
+            tag = 'a'
+        else:
+            # Generic: try common product card patterns
+            for pattern in [r'<div[^>]*class="[^"]*product[^"]*"', r'<article[^>]*']:
+                card_starts = [m.start() for m in re.finditer(pattern, html, re.IGNORECASE)]
+                if card_starts:
+                    tag = pattern.split('<')[1].split('[')[0].split(' ')[0]
+                    break
+
+        for start in card_starts[:20]:
+            end = self._find_closing_tag(html, start, tag=tag if platform != "amazon" else 'div')
+            if not end:
+                continue
+            card_html = html[start:end]
+
+            # Skip sponsored/ad cards
+            if 'AdHolder' in card_html or 'sp-sponsored' in card_html or 'data-component-type="sp-' in card_html:
+                continue
+
+            image_url = self._extract_card_image(card_html)
+            product_url = self._extract_card_link(card_html, platform, base_url)
+            cards.append({"html": card_html, "image_url": image_url, "product_url": product_url})
+
+        return cards
+
+    def _extract_card_image(self, card_html: str) -> Optional[str]:
+        """Extract the first relevant product image from a single card's HTML."""
+        for match in re.finditer(
+            r'src="(https?://[^"]+\.(?:jpg|jpeg|png|webp)(?:\?[^"]*)?)"',
+            card_html, re.IGNORECASE
+        ):
+            url = match.group(1)
+            if any(skip in url.lower() for skip in [
+                'icon', 'sprite', 'logo', 'pixel', '1x1', 'badge',
+                'star', 'rating', 'overlay', 'placeholder', 'loading'
+            ]):
+                continue
+            if re.search(r'[/_.](\d{1,2})x(\d{1,2})[/._]', url):
+                continue
+            return url
+        return None
+
+    def _extract_card_link(self, card_html: str, platform: str, base_url: str) -> Optional[str]:
+        """Extract the product page URL from a single card's HTML."""
+        if platform == "amazon":
+            match = re.search(r'href="(/[^"]*?/dp/[A-Z0-9]{10})[^"]*"', card_html)
+            if match:
+                clean = re.match(r'(/[^?]*?/dp/[A-Z0-9]{10})', match.group(1))
+                return base_url + clean.group(1) if clean else None
+        elif platform == "flipkart":
+            match = re.search(r'href="(/[^"]*?/p/[^"?]+)', card_html)
+            if match:
+                return base_url + match.group(1)
+        else:
+            match = re.search(r'href="(/[^"]{20,})"', card_html)
+            if match:
+                path = match.group(1)
+                if not any(s in path for s in ['/s?', '/search', '/cart', '/account', '/login']):
+                    return base_url + path
+        return None
+
     def _html_to_markdown(self, html):
         """Convert HTML to markdown for LLM processing."""
         if HTML2TEXT_AVAILABLE:
@@ -648,30 +811,37 @@ class ProductScraper:
 # ============================================
 
 def _get_demo_products(query, category=None):
-    """Return demo products when scraping fails."""
+    """Return demo products when scraping fails. Provides enough products for a useful display."""
     base_price = random.randint(15000, 75000)
-    return [
-        {
+    product_variants = [
+        ("Premium Model", 0, 4.6, 3200, "In Stock", "Amazon"),
+        ("Pro Edition", -2000, 4.4, 1850, "In Stock", "Flipkart"),
+        ("Standard Edition", -5000, 4.3, 2400, "In Stock", "Amazon"),
+        ("Lite Version", -8000, 4.1, 980, "In Stock", "Flipkart"),
+        ("Value Pack", -10000, 4.0, 1500, "In Stock", "Amazon"),
+        ("Budget Option", -12000, 3.9, 620, "Limited Stock", "Flipkart"),
+    ]
+    products = []
+    for i, (label, offset, rating, reviews, avail, platform) in enumerate(product_variants):
+        price = max(base_price + offset, 999)
+        product = {
             "platform_product_id": f"DEMO{i:03d}",
-            "name": f"[DEMO] {query.title()} - {label}",
+            "name": f"[Demo] {query.title()} - {label}",
             "url": None,
-            "price": base_price + offset,
+            "price": price,
             "currency": "INR",
-            "original_price": base_price + offset + random.randint(2000, 8000) if i < 2 else None,
-            "rating": round(random.uniform(3.8, 4.8), 1),
-            "review_count": random.randint(100, 5000),
+            "rating": rating,
+            "review_count": reviews,
             "image_url": None,
-            "availability": "Demo Data",
-            "platform": "Demo Mode",
+            "availability": avail,
+            "platform": platform,
             "category": category or "Electronics",
             "is_demo": True,
         }
-        for i, (label, offset) in enumerate([
-            ("Premium Model", 0),
-            ("Standard Edition", -random.randint(3000, 8000)),
-            ("Budget Option", -random.randint(8000, 15000)),
-        ])
-    ]
+        if i < 3:
+            product["original_price"] = price + random.randint(2000, 8000)
+        products.append(product)
+    return products
 
 
 # ============================================

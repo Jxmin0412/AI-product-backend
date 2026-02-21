@@ -57,6 +57,14 @@ class SearchResponse(BaseModel):
     totalResults: int
 
 
+class ForYouResponse(BaseModel):
+    """Personalized recommendations based on other users' searches."""
+    source: str
+    category: Optional[str] = None
+    label: str
+    recommendations: List[ProductResponse]
+
+
 class PlatformPrice(BaseModel):
     """Price info for a specific platform."""
     platform: str

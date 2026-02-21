@@ -23,11 +23,11 @@ User searched for: "{query}"
 User preferences: {preferences}
 
 Product: {product_name}
-Price: ${price}
+Price: {price}
 Rating: {rating}/5 ({reviews} reviews)
 Key features: {features}
 
-Write a concise reason why this product is a good match for the user. Focus on value, quality, or specific features that match their needs."""
+Write a concise, specific reason why this product is a good match. Mention the product's standout qualities — its rating, price, specific features, or brand reputation. Do NOT be generic."""
 
 
 PRODUCT_EXTRACTION_PROMPT = """You are a product data extraction specialist. Extract structured product information from the following webpage content.
@@ -50,37 +50,37 @@ Webpage content:
 
 JSON Response:"""
 
-SEARCH_RESULTS_EXTRACTION_PROMPT = """You are a product data extraction specialist. Extract ALL product listings from the following search results page.
+SEARCH_RESULTS_EXTRACTION_PROMPT = """You are a product data extraction specialist. Extract ALL product listings from the search results below.
 
-IMPORTANT: Return ONLY a valid JSON array. Each element must have these fields:
-- name (string, required) — full product name
-- price (number, required) — current selling price as a plain number, NO currency symbols
-- original_price (number or null) — original/MRP price before discount, as a plain number
-- currency (string) — "INR" for Indian sites, "USD" otherwise
+CRITICAL RULES:
+1. Return ONLY a valid JSON array — no explanation, no markdown fences, just the array.
+2. Extract EVERY visible product (up to {max_results}). Do NOT skip products.
+3. Each product MUST have "name" (string) and "price" (number > 0). Omit products missing either.
+4. If the content has sections like "=== PRODUCT N ===" with pre-extracted URLs and images, use those EXACT URLs — do NOT guess or fabricate URLs.
+
+FIELDS per product:
+- name (string, required) — full product name as shown
+- price (number, required) — selling price as plain number, NO currency symbols
+- original_price (number or null) — MRP/original price before discount
+- currency (string) — "INR" for Indian sites
 - rating (number or null) — rating out of 5
-- review_count (integer or null) — number of reviews
-- image_url (string or null) — product image URL (must start with http)
-- url (string or null) — link to product detail page (relative or absolute)
+- review_count (integer or null) — number of reviews/ratings
+- image_url (string or null) — product image URL from the content (must start with http). Use the "Product Image URL" if provided.
+- url (string or null) — product detail page link. Use the "Product URL" if provided.
 - availability (string) — "In Stock", "Out of Stock", or "Unknown"
-- platform_product_id (string or null) — any product/item ID visible in the URL or data
+- platform_product_id (string or null) — product/item ID from URL
 
-PRICE PARSING RULES (critical):
-- Indian Rupee prices use ₹ symbol and Indian comma format: ₹1,49,990 means 149990, ₹29,999 means 29999
-- Strip ALL commas and currency symbols before returning the number
-- "₹1,49,990" → 149990, "₹29,999" → 29999, "₹999" → 999, "$49.99" → 49.99
-- If you see a price like "1,49,990" or "29,999" without a symbol, it is still a valid price in INR
-- NEVER return price as 0. If you cannot determine the price, omit that product entirely.
-
-Extract up to {max_results} products. Skip sponsored/ad listings if identifiable.
-Only include products with BOTH a name AND a valid non-zero price.
+PRICE PARSING (Indian Rupee):
+- ₹1,49,990 → 149990, ₹29,999 → 29999, ₹999 → 999
+- Strip ALL commas and currency symbols. NEVER return price as 0.
 
 Platform: {platform}
 Search query: {query}
 
-Page content:
+Content:
 {content}
 
-JSON Array Response:"""
+JSON Array:"""
 
 
 COMPARISON_RECOMMENDATION_PROMPT = """Based on the following product comparison data across multiple platforms, provide a brief recommendation (2-3 sentences).

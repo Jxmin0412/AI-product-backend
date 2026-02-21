@@ -41,6 +41,25 @@ async def get_current_user(
     return user
 
 
+async def get_current_user_optional(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    db: Session = Depends(get_db)
+) -> Optional[User]:
+    """Dependency to get current user if authenticated, or None for anonymous requests."""
+    if credentials is None:
+        return None
+
+    payload = decode_access_token(credentials.credentials)
+    if payload is None:
+        return None
+
+    user = db.query(User).filter(User.id == payload.get("sub")).first()
+    if user is None or not user.is_active:
+        return None
+
+    return user
+
+
 def get_refresh_token_from_cookie(request: Request) -> str:
     """Extract refresh token from httpOnly cookie."""
     token = request.cookies.get("refresh_token")

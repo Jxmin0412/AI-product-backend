@@ -176,16 +176,19 @@ class UserSearch(Base):
     __tablename__ = "user_searches"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True, index=True)
     query_text = Column(Text, nullable=False)
     extracted_product_name = Column(String(500))
     extracted_category = Column(String(100), index=True)
     extracted_min_price = Column(Numeric(12, 2))
     extracted_max_price = Column(Numeric(12, 2))
     results_count = Column(Integer)
+    results_data = Column(JSONB)  # Store actual product results for cross-user recommendations
     session_id = Column(String(255))
     searched_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     # Relationships
+    user = relationship("User", backref="searches")
     recommendations = relationship("Recommendation", back_populates="search")
 
     def __repr__(self):

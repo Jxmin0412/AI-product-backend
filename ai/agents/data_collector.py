@@ -19,6 +19,7 @@ class DataCollectorAgent(BaseAgent):
 
     DEFAULT_PLATFORMS = ["amazon", "flipkart"]
     MAX_PRODUCTS = 20
+    MIN_PRODUCTS = 6
 
     def __init__(self, scraper_client: Optional[ProductScraper] = None):
         super().__init__(name="DataCollector")
@@ -42,6 +43,23 @@ class DataCollectorAgent(BaseAgent):
                 platforms=platforms,
                 max_results=self.MAX_PRODUCTS
             )
+
+            # If too few results, retry with just the core product name (no features/brand)
+            if len(products) < self.MIN_PRODUCTS and state.extracted_product_name:
+                core_query = state.extracted_product_name
+                if core_query != search_params["query"]:
+                    logger.info(f"Only {len(products)} results, retrying with core query: '{core_query}'")
+                    retry_products = await self.scraper.search_products(
+                        query=core_query,
+                        category=search_params.get("category"),
+                        platforms=platforms,
+                        max_results=self.MAX_PRODUCTS,
+                    )
+                    existing_names = {p.get("name", "").lower() for p in products}
+                    for p in retry_products:
+                        if p.get("name", "").lower() not in existing_names:
+                            products.append(p)
+                            existing_names.add(p.get("name", "").lower())
 
             state.raw_product_data = products
 
@@ -68,6 +86,7 @@ class DataCollectorAgent(BaseAgent):
         if state.extracted_brand:
             query = f"{state.extracted_brand} {query}"
 
+        # Only append top features if they add meaningful specificity
         if state.extracted_features:
             top_features = state.extracted_features[:2]
             query = f"{query} {' '.join(top_features)}"
