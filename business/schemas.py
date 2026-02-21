@@ -13,15 +13,14 @@ class BusinessMetricResponse(BaseModel):
     trend: str  # 'up', 'down', 'stable'
 
 
-class TrendDataPoint(BaseModel):
-    """Data point for trend charts."""
-    month: str
-    avgPrice: Optional[float] = None
-    searches: Optional[int] = None
+class DailySearchVolume(BaseModel):
+    """Search count per day for line/area charts."""
+    date: str
+    searches: int
 
 
 class CompetitorData(BaseModel):
-    """Competitor benchmarking data."""
+    """Platform benchmarking data."""
     platform: str
     products: int
     avgPrice: float
@@ -29,28 +28,45 @@ class CompetitorData(BaseModel):
     avgRating: Optional[float] = None
 
 
-class CustomerJourneyMetric(BaseModel):
-    """Customer journey stage metric."""
-    stage: str
+class TopSearchTerm(BaseModel):
+    """Top search term with frequency."""
+    term: str
+    category: Optional[str] = None
+    count: int
+
+
+class UserActivityItem(BaseModel):
+    """User activity summary."""
+    email: str
+    searchCount: int
+    lastActive: datetime
+
+
+class CategoryBreakdown(BaseModel):
+    """Search category distribution."""
+    category: str
     count: int
     percentage: float
 
 
-class SentimentData(BaseModel):
-    """Sentiment analysis data."""
-    positive: int
-    neutral: int
-    negative: int
+class PriceInsight(BaseModel):
+    """Price statistics per category from search results."""
+    category: str
+    avgPrice: float
+    minPrice: float
+    maxPrice: float
+    productCount: int
 
 
 class BusinessDashboardResponse(BaseModel):
     """Complete business dashboard data."""
     metrics: List[BusinessMetricResponse]
-    priceTrends: List[TrendDataPoint]
-    searchTrends: List[TrendDataPoint]
-    competitors: List[CompetitorData]
-    customerJourney: List[CustomerJourneyMetric]
-    sentiment: SentimentData
+    dailySearchVolume: List[DailySearchVolume]
+    categoryBreakdown: List[CategoryBreakdown]
+    topSearchTerms: List[TopSearchTerm]
+    platformPerformance: List[CompetitorData]
+    userActivity: List[UserActivityItem]
+    priceInsights: List[PriceInsight]
 
 
 class InsightResponse(BaseModel):
