@@ -17,7 +17,7 @@ class DataCollectorAgent(BaseAgent):
     Uses HTML-based scrapers for real data extraction.
     """
 
-    DEFAULT_PLATFORMS = ["amazon", "flipkart"]
+    DEFAULT_PLATFORMS = ["amazon", "snapdeal", "vijaysales", "shopclues"]
     MAX_PRODUCTS = 20
     MIN_PRODUCTS = 6
 

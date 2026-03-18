@@ -526,7 +526,7 @@ def _dict_to_comparison(d: dict, is_best: bool = False) -> PlatformComparison:
 @router.get("/search/compare", response_model=SmartComparisonResponse)
 async def smart_compare_products(
     query: str = Query(..., min_length=1, max_length=500, description="Product search query"),
-    platforms: Optional[str] = Query(None, description="Comma-separated platforms: amazon,flipkart,myntra,croma"),
+    platforms: Optional[str] = Query(None, description="Comma-separated platforms: amazon,snapdeal,vijaysales,shopclues"),
 ):
     """
     Search and compare a product across multiple e-commerce platforms.
@@ -570,9 +570,9 @@ async def get_supported_platforms():
     """Get list of supported e-commerce platforms for comparison."""
     category_map = {
         "amazon": ["Electronics", "Computers", "Smartphones", "Home", "Fashion", "Books"],
-        "flipkart": ["Electronics", "Computers", "Smartphones", "Home", "Fashion", "Appliances"],
-        "myntra": ["Fashion", "Footwear", "Accessories", "Beauty"],
-        "croma": ["Electronics", "Smartphones", "Computers", "Appliances", "Audio"],
+        "snapdeal": ["Electronics", "Home", "Fashion", "Accessories", "Health"],
+        "vijaysales": ["Electronics", "Smartphones", "Laptops", "Appliances", "Audio"],
+        "shopclues": ["Electronics", "Home", "Fashion", "Accessories", "Lifestyle"],
     }
 
     platforms = []

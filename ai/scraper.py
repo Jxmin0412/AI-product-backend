@@ -65,23 +65,23 @@ PLATFORM_CONFIGS: Dict[str, PlatformConfig] = {
         search_url_template="https://www.amazon.in/s?k={query}",
         trust_score=85.0,
     ),
-    "flipkart": PlatformConfig(
-        name="Flipkart",
-        base_url="https://www.flipkart.com",
-        search_url_template="https://www.flipkart.com/search?q={query}",
-        trust_score=82.0,
+    "snapdeal": PlatformConfig(
+        name="Snapdeal",
+        base_url="https://www.snapdeal.com",
+        search_url_template="https://www.snapdeal.com/search?keyword={query}&sort=rlvncy",
+        trust_score=72.0,
     ),
-    "myntra": PlatformConfig(
-        name="Myntra",
-        base_url="https://www.myntra.com",
-        search_url_template="https://www.myntra.com/{query}",
+    "vijaysales": PlatformConfig(
+        name="Vijay Sales",
+        base_url="https://www.vijaysales.com",
+        search_url_template="https://www.vijaysales.com/search/{query}",
         trust_score=78.0,
     ),
-    "croma": PlatformConfig(
-        name="Croma",
-        base_url="https://www.croma.com",
-        search_url_template="https://www.croma.com/searchB?q={query}",
-        trust_score=80.0,
+    "shopclues": PlatformConfig(
+        name="ShopClues",
+        base_url="https://www.shopclues.com",
+        search_url_template="https://www.shopclues.com/search?q={query}",
+        trust_score=70.0,
     ),
 }
 
@@ -95,9 +95,9 @@ _USER_AGENTS = [
 
 _PLATFORM_REFERERS = {
     "amazon": "https://www.amazon.in/",
-    "flipkart": "https://www.flipkart.com/",
-    "myntra": "https://www.myntra.com/",
-    "croma": "https://www.croma.com/",
+    "snapdeal": "https://www.snapdeal.com/",
+    "vijaysales": "https://www.vijaysales.com/",
+    "shopclues": "https://www.shopclues.com/",
 }
 
 def _get_browser_headers(platform: str = None) -> dict:
@@ -605,19 +605,6 @@ class ProductScraper:
                 if cards:
                     return "\n".join(cards)
 
-            # Flipkart: extract product link containers
-            card_starts = [m.start() for m in re.finditer(
-                r'<a[^>]*href="[^"]*/p/[^"]*"', html
-            )]
-            if card_starts:
-                cards = []
-                for start in card_starts[:20]:
-                    end = self._find_closing_tag(html, start, tag='a')
-                    if end:
-                        cards.append(html[start:end])
-                if cards:
-                    return "\n".join(cards)
-
             # Generic: strip header/footer/nav/scripts, keep body content
             for tag in ['header', 'nav', 'footer', 'script', 'style', 'noscript']:
                 html = re.sub(rf'<{tag}[^>]*>.*?</{tag}>', '', html, flags=re.DOTALL | re.IGNORECASE)
@@ -679,15 +666,13 @@ class ProductScraper:
                 if clean and clean.group(1) not in seen:
                     seen.add(clean.group(1))
                     links.append(base_url + clean.group(1))
-        elif platform == "flipkart":
-            # Flipkart product URLs contain /p/
-            for match in re.finditer(r'href="(/[^"]*?/p/[^"?]+)', html):
-                path = match.group(1)
+        elif platform == "snapdeal":
+            for match in re.finditer(r'href="(/product/[^"]+)"', html):
+                path = match.group(1).split('?')[0]
                 if path not in seen:
                     seen.add(path)
                     links.append(base_url + path)
         else:
-            # Generic: extract links that look like product pages
             for match in re.finditer(r'href="(/[^"]{20,})"', html):
                 path = match.group(1)
                 if path not in seen and not any(s in path for s in ['/s?', '/search', '/cart', '/account', '/login']):
@@ -709,13 +694,12 @@ class ProductScraper:
                 r'<div[^>]*data-component-type="s-search-result"', html
             )]
             tag = 'div'
-        elif platform == "flipkart":
+        elif platform == "snapdeal":
             card_starts = [m.start() for m in re.finditer(
-                r'<a[^>]*href="[^"]*/p/[^"]*"', html
+                r'<div[^>]*class="[^"]*product-tuple-listing[^"]*"', html, re.IGNORECASE
             )]
-            tag = 'a'
+            tag = 'div'
         else:
-            # Generic: try common product card patterns
             for pattern in [r'<div[^>]*class="[^"]*product[^"]*"', r'<article[^>]*']:
                 card_starts = [m.start() for m in re.finditer(pattern, html, re.IGNORECASE)]
                 if card_starts:
@@ -762,10 +746,10 @@ class ProductScraper:
             if match:
                 clean = re.match(r'(/[^?]*?/dp/[A-Z0-9]{10})', match.group(1))
                 return base_url + clean.group(1) if clean else None
-        elif platform == "flipkart":
-            match = re.search(r'href="(/[^"]*?/p/[^"?]+)', card_html)
+        elif platform == "snapdeal":
+            match = re.search(r'href="(/product/[^"]+)"', card_html)
             if match:
-                return base_url + match.group(1)
+                return base_url + match.group(1).split('?')[0]
         else:
             match = re.search(r'href="(/[^"]{20,})"', card_html)
             if match:
@@ -798,9 +782,9 @@ class ProductScraper:
             if platform == "amazon":
                 match = re.search(r'/(?:dp|gp/product)/([A-Z0-9]{10})', url)
                 return match.group(1) if match else None
-            elif platform == "flipkart":
-                match = re.search(r'/p/([a-zA-Z0-9]+)', url)
-                return match.group(1) if match else None
+            elif platform == "snapdeal":
+                match = re.search(r'/(\d{8,})$', url.rstrip('/'))
+                return match.group(1) if match else url.rstrip('/').split('/')[-1]
             return url.rstrip('/').split('/')[-1]
         except Exception:
             return None
